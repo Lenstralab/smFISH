@@ -1,5 +1,8 @@
 #########################################################################################################
 #########################################################################################################
+
+"Some of this code was adapted from our collaborator Antoine Coulon (2020) <antoine.coulon@curie.fr>"
+
 import os
 import sys
 #sys.path.insert(0, '/Users/lenstratl/Documents/dataAnalysis/src')
