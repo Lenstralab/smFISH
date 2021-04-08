@@ -1,3 +1,5 @@
+"Some of this code was adapted from our collaborator Antoine Coulon (2020) <antoine.coulon@curie.fr>"
+
 from scipy import *; from scipy import special, linalg, fftpack
 from PIL import Image as pil
 import copy as copy2, sys, os, time, cPickle, commands, re
