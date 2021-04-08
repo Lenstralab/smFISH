@@ -1,3 +1,12 @@
+##################################################################
+##
+## Spot-fitting and bandpass routines
+##
+## Antoine Coulon, 2020
+## Contact: <antoine.coulon@curie.fr>
+##
+## Code under GPL v3 license
+
 from scipy import *
 from scipy import ndimage
 from skimage import filters
