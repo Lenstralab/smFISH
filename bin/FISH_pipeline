@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+
+import sys
+import smfish
+from tllab_common.wimread import imread
+
+if __name__ == '__main__':
+    smfish.FISH_pipeline.main(sys.argv)
+    imread.kill_vm()
