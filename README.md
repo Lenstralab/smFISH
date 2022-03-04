@@ -8,10 +8,13 @@ Install git: https://git-scm.com/
     git clone https://github.com/Lenstralab/smFISH.git
     cd smFISH
 
-# Code used for Brouwer et al.
+# Version of code used for Patel et al.
+    git checkout 011e50731237ca2fc8427099996a788244fe5ec9
+
+# Version of code used for Brouwer et al.
     git checkout 28e6f801bbf95c88a18d09074adbd96ca12b430a
 
-# Code used for Gowthaman et al.
+# Version of code used for Gowthaman et al.
     git checkout 36e73147e1c61a57e3ebfac595017d01a0553130
 
 ## Installation
