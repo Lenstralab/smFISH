@@ -1,0 +1,10 @@
+\.DS_Store
+*.pyc
+._*
+tmp.txt
+.idea*
+.eggs
+*.egg-info
+.pytest*
+/demo_output/
+/test_files/demo_output_correlations/

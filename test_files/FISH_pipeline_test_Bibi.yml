@@ -9,22 +9,13 @@
 #  -outputfolder: full path of outputfolder. Example: "/DATA/lenstra_lab/XXXX/smFISH_analysis/"
 #  -analysisfolder: full path of folder where violin plots will be written. Example: "/DATA/lenstra_lab/XXXX/smFISH_analysis/analysis"
 
-folderIn: "/DATA/lenstra_lab/in.brouwer/smFISH_data/20210309/"
+folderIn: "/DATA/lenstra_lab/shared/smFISH_testdata/Bibi/"
+fileListIn:
+  ["20191024/1_WaplAID_mESC_0hAuxin_25July2019_3D_rep1_2"]
+#  ["/20191024/4_WaplAID_mESC_6hAuxin_25July2019_3D_rep1_1"]
 
-fileListIn:   ['YTL1510B1-1-1_gal-rapa_PP7-Cy5_GAL3-Cy3_1',
-               'YTL1510B1-2-1_gal+rapa_PP7-Cy5_GAL3-Cy3_1',
-               'YTL1510B1-2-1_gal-rapa_PP7-Cy5_GAL3-Cy3_1',
-               'YTL1510B2-1-1_gal+rapa_PP7-Cy5_GAL3-Cy3_1',
-               'YTL1510B2-1-1_gal-rapa_PP7-Cy5_GAL3-Cy3_1']
-# fileListIn:   ['YTL1510B1-1-1_gal+rapa_PP7-Cy5_GAL3-Cy3_1',
-#                'YTL1510B1-1-1_gal-rapa_PP7-Cy5_GAL3-Cy3_1',
-#                'YTL1510B1-2-1_gal+rapa_PP7-Cy5_GAL3-Cy3_1',
-#                'YTL1510B1-2-1_gal-rapa_PP7-Cy5_GAL3-Cy3_1',
-#                'YTL1510B2-1-1_gal+rapa_PP7-Cy5_GAL3-Cy3_1',
-#                'YTL1510B2-1-1_gal-rapa_PP7-Cy5_GAL3-Cy3_1']
-
-outputfolder: "/DATA/lenstra_lab/in.brouwer/smFISH_analysis/YTL1510/"
-analysisfolder: "/DATA/lenstra_lab/in.brouwer/smFISH_analysis/YTL151-/"
+outputfolder: "/DATA/lenstra_lab/t.lenstra/FISH_analysis/test_Marit"
+analysisfolder: "/DATA/lenstra_lab/t.lenstra/FISH_analysis/test_Marit"
 
 ### specify how many images per experiment and channels you want to analyze
 #  -processAll: 1 if you want to process all images (FOV) in the folder, if 0, specify nr of files you want to analyze
@@ -51,19 +42,18 @@ channelsToAnalyze: [0,1]
 #  -CombineReps: 0 or 1. Combine replicates and make histograms and violin plots (optional)
 #  -UsePrecalcDistr: 0 or 1. To use precalculated histogram distributions
 
-MaxProj: 0
+MaxProj: 1
 RunCellprofiler: 0
-RunFindCells: 0
+RunFindCells: 1
 RunOptimizeThresh: 0
-RunLocalize: 0
-MakeMaskImage: 0
-MakeMontage: 0
-CellCycle: 1
-CalculateTranscriptionSites: 0
-MakeHistograms: 0
-CalcSingleCellCorr: 0
-Violins: 0
-CompareNormValues: 0
+RunLocalize: 1
+MakeMaskImage: 1
+MakeMontage: 1
+CalculateTranscriptionSites: 1
+MakeHistograms: 1
+CalcSingleCellCorr: 1
+Violins: 1
+CompareNormValues: 1
 CombineReps: 0
 UsePrecalcDistr: 0
 
@@ -71,7 +61,7 @@ UsePrecalcDistr: 0
 #  -zSlices: nr z slices, example: 9
 #  -nChannels: nr channels including DAPI channel, example for cy3-cy5-DAPI data: 3
 
-zSlices: 21
+zSlices: 47
 nChannels: 3
 
 ##### Parameters for RunCellprofiler
@@ -95,19 +85,19 @@ PipelineCellProfiler:
 #  -dilate: dilate>0: make every cell dilate pixels larger; <0: make them smaller
 #  -dilatenuc: example: 3
 
-channelCellMask : 'Cy5'
-ccdist : 25
+channelCellMask : "Cy5"
+ccdist : 70
 threshold : None
 thresholdnuc : None
 removeborders : True
 thres : 1
 thresnuc : 1
-smooth : 3
-smoothnuc : 2.5
-minfeatsize : 5
-minfeatsizenuc : 5
-dilate : 3
-dilatenuc : 3
+smooth : 6
+smoothnuc : 6
+minfeatsize : 20
+minfeatsizenuc : 20
+dilate : 0
+dilatenuc : 0
 
 ##### Parameters Localize
 #  -localizeDim : "2D" or "3D". For 3D, preferably image with 0.3 um z step and take more frames above and below cell for fitting.
@@ -120,32 +110,15 @@ dilatenuc : 3
 #  -winSize:  size of the window used for PSF fitting, example: 5
 #  -winSizeZ: size of the window used for PSF fitting in z, example: 3
 
-localizeDim : '3D'
-threshold_cy3: 105
-threshold_cy5: 73
-psfPx: 1.70
-psfPxZ : 1.55
+localizeDim : "2D"
+threshold_cy3: 21
+threshold_cy5: 16
+psfPx: 2.18
+psfPxZ : 1.46
 maxDist: 3.
 minSeparation: .1
 winSize : 5
-winSizeZ : 3
-
-##### Parameters CellCycle
-#   -fitNucHistogram: Enter 0 or 1. This fits the bimodal distribution with Gaussians. Needs to be calculated for subsequent steps.
-#   -removeOutliers: Enter None or an integer (based on initial histogram). This will remove all elements in histogram that are above the input value.
-#   -sigmaG1cells: Enter z score (plus and minus) to get the desired classification of G1 cells in the distribution. i.e. [1,1]
-#   -sigmaG2cells: Enter z score (plus and minus) to get the desired classification of G2 cells in the distribution. i.e. [1,1]
-#   -manualThreshold: Enter 'None' to have the automated thresholds. Or enter a range (i.e. [3000,5000]) to provide a custom threshold. Results will be saved in subfolder named 'ManualThreshold'
-#   -CellCycleStages: Enter which stage you want analyzed. Four options are: ['G1cellswithbuds','G1cells','Scells','G2cells'].
-#   -makeMasks: Enter 0 or 1. This makes the cell and nuclear masks for the subset of cells that are selected based on the dapi thresholds. Masks are saved in the respective subfolders. Required for CalculateTranscriptionSites, MakeHistograms and CalcSingleCellCorr.
-
-fitNucHistogram: 0
-removeOutliers: None
-sigmaG1cells: [1,0.75]
-sigmaG2cells: [0.5,1.5]
-manualThreshold: None
-CellCycleStages: ['G1cellswithbuds','G1cells','Scells','G2cells']
-makeMasks: 0
+winSizeZ : 5
 
 ##### Parameters Calculate TS
 #  -MaskTS : "nucleus " or "cell". Mask used for defining the TS (brightest spot)
@@ -161,17 +134,17 @@ makeMasks: 0
 #  -thresholdTS : threshold used to determine if nuclear spot is TS (if includeMultTS is 1). The threshold indicates how many nascent RNAs need to present to qualify as TS (it is is multiplied by the normalization factor of the cytoplasmic spot intensity). Note, the results do not contain the cells without TS. Example: 1.5
 #  -nrTS2Include :number of TS to include in the analysis (if includeMultTS is 2). It will select the brightest spots as TS. Note, if less TS are found in a nucleus, the script will add a zero (so each cell will have same nr of TS). Example: 2
 
-MaskTS: 'cell'
-AreaNorm: 'cyto'
-ExclEmpty: 1
-useControlForEmptyCells: 0
-controlColor: 0
+MaskTS: "nucleus"
+AreaNorm: "cell"
+ExclEmpty: 0
+useControlForEmptyCells: 1
+controlColor: 1
 useFit: 0
 useNormValue: 0
 NormValueCy3: 13384
-NormValueCy5: 2
-includeMultTS: 0
-thresholdTS: 1.5
+NormValueCy5: 4421
+includeMultTS: 2
+thresholdTS: 2.5
 nrTS2Include: 2
 
 ##### Parameters histogram
@@ -193,13 +166,13 @@ nrTS2Include: 2
 
 exclBins: 0
 exclBinsCount: 0
-FitBurst: 0
-FitPoisson: 0
-CalcFracOff: 1
+FitBurst: 1
+FitPoisson: 1
+CalcFracOff: 0
 nrbins_cy3: 100
-nrbins_cy5: 100
-nrbins_cy3_ts: 50
-nrbins_cy5_ts: 50
+nrbins_cy5: 300
+nrbins_cy3_ts: 15
+nrbins_cy5_ts: 15
 freqAxisCell_cy3 : "None"
 freqAxisCell_cy5 : "None"
 freqAxisNuc_cy3 : "None"
@@ -212,15 +185,15 @@ freqAxisTS_cy5 : "None"
 #  -distThresh: threshold for determining co-localization, in pixels, example: 4
 #  -onoffThreshCy3: threshold to determine if cells are on or off in Cy3, example: 6
 #  -onoffThreshCy5: threshold to determine if cells are on or off in Cy5, example: 4
-#  -x_lim: tuple of x-lim for all TS correlation plots, with normal brackets. Example: (0,50)
-#  -y_lim: tuple of y-lim for all TS correlation plots, with normal brackes. Example: (0,50)
+#  -x_lim: max x value  for all TS correlation plots. Example: 50
+#  -y_lim: max y value for all TS correlation plotsl Example: 50
 
 filterOnDistance: 0
 distThresh: 4
-onoffThreshCy3: 2
-onoffThreshCy5: 2
-x_lim: (0,50)
-y_lim: (0,50)
+onoffThreshCy3: 6
+onoffThreshCy5: 4
+x_lim: 50
+y_lim: 50
 
 ##### Parameters for Violin plots
 #  -pvalsViolins: indicates between which datasets you want to calculate pvalues to be plotted in Violin plots. Starts numbering at 1. Leave empty ([[]]) if you don't want any pvalues calculated. Example: [[1,2][3,4]]
@@ -231,15 +204,20 @@ y_lim: (0,50)
 #  -yAxisViolinTS_cy3:  scaling of y-axis of TS violin plot Cy3, example (automatically if "None"): 0.5 or "None"
 #  -yAxisViolinTS_cy5:  scaling of y-axis of TS violin plot Cy5, example (automatically if "None"): 0.5 or "None"
 
-pvalsViolins: [[]]
-yAxisViolinCell_cy3: 100
-yAxisViolinCell_cy5: 100
-yAxisViolinNuc_cy3: 50
-yAxisViolinNuc_cy5: 50
-yAxisViolinTS_cy3: 40
-yAxisViolinTS_cy5: 10
+pvalsViolins: [[1]]
+yAxisViolinCell_cy3: "None"
+yAxisViolinCell_cy5: 600
+yAxisViolinNuc_cy3: "None"
+yAxisViolinNuc_cy5: 600
+yAxisViolinTS_cy3: 15
+yAxisViolinTS_cy5: 6
 
 ##### Parameteres combine reps
 #  -repsToCombine:  #List how you want your replicates to be combined. Format as (for example) [[1,2,3],[4],[5,6]] etc. Make sure all dataset numbers are in this list; numbering starts at 1.
 
-repsToCombine: [[]]
+repsToCombine: [[1]]
+CellCycle: 0
+fitNucHistogram: 0
+makeMasks: 0
+CellCycleStages: ['G1cells']
+manualThreshold: "None"

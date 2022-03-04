@@ -8,7 +8,7 @@ with open('README.md', 'r') as fh:
 
 setuptools.setup(
     name='smfish',
-    version='2022.2.0',
+    version='2022.3.0',
     author='Lenstra lab NKI',
     author_email='t.lenstra@nki.nl',
     description='Single molecule FISH code for the Lenstra lab.',

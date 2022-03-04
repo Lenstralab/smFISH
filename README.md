@@ -1,5 +1,6 @@
 # smFISH
-Lenstra labs code for single molecule FISH as used by Gowthaman et al. and Brouwer et al. This script uses Python 3.
+Lenstra labs code for single molecule FISH as used by Gowthaman et el, Brouwer et al and Patel et al.
+This script uses Python 3.
 
 ## Cloning the repository
 Install git: https://git-scm.com/
@@ -7,11 +8,11 @@ Install git: https://git-scm.com/
     git clone https://github.com/Lenstralab/smFISH.git
     cd smFISH
 
-# Code used for Gowthaman et al.
-    git checkout 36e73147e1c61a57e3ebfac595017d01a0553130
-
 # Code used for Brouwer et al.
     git checkout 28e6f801bbf95c88a18d09074adbd96ca12b430a
+
+# Code used for Gowthaman et al.
+    git checkout 36e73147e1c61a57e3ebfac595017d01a0553130
 
 ## Installation
 If not done already:

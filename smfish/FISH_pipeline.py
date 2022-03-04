@@ -949,7 +949,7 @@ def calculate_TS(lfn, params, paramsexp):
                         if row[0] > ld[fi][nucnr]:
                             ld[fi][nucnr] = row[0]  ### replace intensity in ld if spot has higher intensity
                             ldPos[fi][nucnr] = row[[0, 1, 2, 3, 5]]  ### replace intensity and x,y location, fit
-                    elif cellnr > 0 and cellnr != 32768 and cellnr != 65535.0:  ### if spot is in cytoplasm but not in nucleus
+                    elif cellnr > 0 and cellnr != 32768 and nucnr != 65535.0:  ### if spot is in cytoplasm but not in nucleus
                         ldCountCell[fi][cellnr] += 1  ### add count to ldCountCell
                         ldCountBoth[fi][cellnr] += 1  ### add count to ldCountBoth
                         ldCytoPos[fi][cellnr] = np.vstack((ldCytoPos[fi][cellnr], row[
