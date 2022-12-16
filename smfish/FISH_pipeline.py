@@ -7,6 +7,7 @@ import sys
 import re
 import numpy as np
 import scipy
+import pandas
 from scipy import optimize
 from scipy import ndimage
 import copy as copy2
@@ -16,29 +17,36 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from lmfit.models import GaussianModel
 import scipy.stats
-from scipy.stats.stats import pearsonr
+from scipy.stats import pearsonr
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from skimage.morphology import binary_erosion
 from datetime import datetime
 import math
 import rtree
 from parfor import parfor, parpool
+from tiffwrite import tiffwrite, IJTiffFile
 from tllab_common.wimread import imread as imr
-from tllab_common.tiffwrite import tiffwrite, IJTiffWriter
 from tllab_common.transforms import Transform
 from tllab_common.findcells import findcells
+from tllab_common.misc import save_roi, ipy_debug
 import psutil
 from time import time
 from tqdm.auto import tqdm
 from PIL import Image, ImageDraw, ImageFont
+from numbers import Number
+from collections.abc import Iterable
 
+from warnings import filterwarnings, warn
+filterwarnings('ignore', 'loadtxt: Empty input file:')
 
 if __package__ is None or __package__ == '':
     import spotDetection_functions as sdf
     import misc
+    import _version
 else:
     from . import spotDetection_functions as sdf
     from . import misc
+    from . import _version
 
 
 #########################################################################################################
@@ -119,7 +127,8 @@ def histTS(distr, hist, bins, Pres, n, aT, PPoissres, cT, freqAxis, xCenter, col
         plt.plot(PPoissres, color='green', label="Poisson model Mean = " + str(round(cT[0], 3)))
     plt.legend(loc='center right')
     ymax = 1.1 * max(hist)
-    if freqAxis != "None": ymax = freqAxis
+    if freqAxis != misc.none():
+        ymax = freqAxis
     plt.ylim([0, ymax])
     plt.title("Number of nascent RNA at the TS, " + color)
     plt.xlabel('Nr nascent RNA at TS')
@@ -153,42 +162,34 @@ def writestatsfile(outFilePart, color, distrCell, distrNuc, distrTS, params):
 #########################################################################################################
 #########################################################################################################
 
-def calculate_general_parameters(params, parameter_file):
-    def_params = misc.getConfig(os.path.join(os.path.split(os.path.split(os.path.abspath(__file__))[0])[0],
-                              'FISH_pipeline_parameters_template.yml'))
-    for k, v in def_params.items():
-        if not k in params:
-            print(misc.color('parameter {} missing, adding with value {}'.format(k, v), 'y'))
-            params[k] = v
-
-    params['lenfileListIn'] = len(params['fileListIn'])
-    for i in range(0, params['lenfileListIn']):
-        if params['fileListIn'][i][-1] != "/": params['fileListIn'][i] += "/"
-        if os.path.exists(os.path.join(params['folderIn'], params['fileListIn'][i])):
-            params['fileListIn'][i] = os.path.join(params['folderIn'], params['fileListIn'][i])
-        else:
-            params['fileListIn'][i] = os.path.join(os.path.dirname(os.path.abspath(parameter_file)),
-                                                   params['folderIn'], params['fileListIn'][i])
-
-    if params['outputfolder'][-1] != "/": params['outputfolder'] += "/"
+def calculate_general_parameters(params):
+    params['fileListIn'] = [os.path.join(params['folderIn'], file) for file in params['fileListIn']]
 
     if params['useControlForEmptyCells'] == 1 and params['channelsToAnalyze'] == [0, 1]:
         if params['controlColor'] == 1:
             params['channelsToAnalyze'] = [1, 0]
+
+    os.makedirs(params['analysisfolder'], exist_ok=True)
+    dim = params['localize']['dimension']
+    if isinstance(dim, str):
+        params['localize']['dimension'] = int(dim[0])
     return params
+
 
 def get_exp_info(pathIn, params):
     paramsexp = {}
-    
+
     #### make file list and output directory
-    paramsexp['date'] = pathIn.split("/")[-3]
-    paramsexp['expName'] = pathIn.split("/")[-2]
-    paramsexp['pathOut'] = params['outputfolder'] + paramsexp['date'] + "_" + paramsexp['expName'] + "/"
-    paramsexp['outfilePart1'] = paramsexp['pathOut'] + paramsexp['date'] + "_" + paramsexp['expName']
-    if not os.path.exists(paramsexp['pathOut']):
-        os.makedirs(paramsexp['pathOut'])
+    paramsexp['date'] = re.findall('(?:\d[_-]?){7}\d', pathIn)[0]
+    paramsexp['expName'] = os.path.basename(pathIn.rstrip(os.path.sep))
+    paramsexp['pathOut'] = os.path.join(params['outputfolder'], f"{paramsexp['date']}_{paramsexp['expName']}")
+    paramsexp['outfilePart1'] = os.path.join(paramsexp['pathOut'],  f"{paramsexp['date']}_{paramsexp['expName']}")
+    os.makedirs(paramsexp['pathOut'], exist_ok=True)
+    paramsexp['zSlices'] = None if params['zSlices'] is None else \
+        range(params['zSlices']) if isinstance(params['zSlices'], Number) else range(*params['zSlices'])
 
     return paramsexp
+
 
 def get_filelist(pathIn, params):
     lfn = os.listdir(pathIn)
@@ -203,7 +204,7 @@ def get_filelist(pathIn, params):
     return lfn
 
 def get_turret_filters(pathIn, lfn, paramsexp):
-    allFiles = os.listdir(pathIn + lfn[0])
+    allFiles = os.listdir(os.path.join(pathIn, lfn[0]))
     if "metadata.txt" in allFiles: allFiles.remove("metadata.txt")
     for element in allFiles:
         if element[0] == '.': allFiles.remove(element)
@@ -217,27 +218,25 @@ def get_turret_filters(pathIn, lfn, paramsexp):
             Turretfilter.extend(splitFiles[i][2:-1])
     paramsexp['ChNames'] = sorted(set(Turretfilter))
     return paramsexp
-    
-    
+
+
 ###########################################################################################################
 ##### Does max projection of images
 ###########################################################################################################
 
-def max_projection(pathIn, lfn, params, paramsexp):
+def max_projection(pathIn, lfn, paramsexp):
     # channels are saved in alphabetical order, which probably is different from the order in the original data
     print("Making maximum intensity projections")
     path = os.path.join(paramsexp['pathOut'], paramsexp['date'])
     for fn in lfn:
-        outfile = path + '_{}_max.tif'.format(fn)
+        outfile = path + '_{}_max.tif'.format(os.path.splitext(fn)[0])
         if not os.path.exists(outfile):
-            with imr(pathIn + fn) as im:
-                with IJTiffWriter(outfile, (im.shape[2], 1, im.shape[4]), dtype='uint16') as tif:
+            with imr(os.path.join(pathIn, fn)) as im:
+                with IJTiffFile(outfile, (im.shape[2], 1, im.shape[4]), dtype='uint16', pxsize=im.pxsize,
+                                deltaz=im.deltaz) as tif:
                     for c, C in enumerate(sorted(range(im.shape[2]), key=lambda i: im.cnamelist[i])):
                         for t in range(im.shape[4]):
-                            mx = np.zeros(im.shape[:2])
-                            for z in range(params['zSlices']):
-                                mx = np.dstack((mx, im(C, z, t))).max(2)
-                            tif.save(mx, c, 0, t)
+                            tif.save(im.max(C, paramsexp['zSlices'], t), c, 0, t)
 
 
 ############################################################################################################
@@ -286,35 +285,48 @@ def find_cells(lfn, params, paramsexp):
                     removeborders=params['removeborders'], thres=params['thres'], thresnuc=params['thresnuc'],
                     smooth=params['smooth'], smoothnuc=params['smoothnuc'], minfeatsize=params['minfeatsize'],
                     minfeatsizenuc=params['minfeatsizenuc'], dilate=params['dilate'], dilatenuc=params['dilatenuc'])
-            tiffwrite(path + '_{}_max_nucleus_mask.tif'.format(fn), nuclei.astype('uint16'), colormap='glasbey')
-            tiffwrite(path + '_{}_max_cell_mask.tif'.format(fn), cells.astype('uint16'), colormap='glasbey')
+            tiffwrite(path + '_{}_max_nucleus_mask.tif'.format(fn), nuclei.astype('uint16'), colormap='glasbey',
+                      pxsize=im.pxsize, deltaz=im.deltaz)
+            tiffwrite(path + '_{}_max_cell_mask.tif'.format(fn), cells.astype('uint16'), colormap='glasbey',
+                      pxsize=im.pxsize, deltaz=im.deltaz)
 
 ############################################################################################################
 #### runs threshold optimization
 ############################################################################################################
 
-def run_optimize_threshold(pathIn, lfn, params, paramsexp):
+def run_optimize_threshold(pathIn, lfn, params, paramsexp, colors=None):
+    if colors is None:
+        colors = 'cy3', 'cy5'
     for channel in params['channelsToAnalyze']:
-        color = ['cy3', 'cy5'][channel]
+        color = colors[channel]
         path = os.path.join(paramsexp['pathOut'], paramsexp['date'])
 
-        tbins = 2
-
         spotslist = spotslistlocalmax = np.zeros(50)
-        threshvals = list(range(0, 40, tbins)) + list(range(40, 120, tbins * 2)) + list(range(120, 200, tbins * 4))
+        if params.get('focianalysis'):  # focianalysis
+            if params['localize']['threshold']['method'].upper() == 'SD':
+                tbins = 1
+                threshvals = np.arange(1., 51., tbins)  # multiplied by SD later
+            else:
+                tbins = 25
+                threshvals = range(100, 1350, tbins)
+        else:
+            tbins = 2
+            threshvals = list(range(0, 40, tbins)) + list(range(40, 120, tbins * 2)) + list(range(120, 200, tbins * 4))
         locMaxValAll = []
 
-        for fn in tqdm(lfn, desc="Optimizing Threshold " + color):
-            if params['localizeDim'].startswith('2'):
+        for fn in tqdm(lfn, desc="Optimizing Threshold " + color, disable=len(lfn)<5):
+            if params['localize']['dimension'] == 2:
                 with imr(path + "_{}_max.tif".format(fn), dtype=float) as im:
-                    imBpass = sdf.bpass(im(channel), 0.75 * params['psfPx'], params['psfPx'])
-            elif params['localizeDim'].startswith('3'):
-                with imr(pathIn + fn, dtype=float) as im:
+                    imBpass = sdf.bpass(im(channel), *(np.array(params['localize']['bpassLimits']) *
+                                                       params['localize']['psfPx']))
+            elif params['localize']['dimension'] == 3:
+                with imr(os.path.join(pathIn, fn), dtype=float) as im:
                     imchannel = sorted(range(im.shape[2]), key=lambda i: im.cnamelist[i])[channel]
-                    imBpass = sdf.bpass3D(im[imchannel, :params['zSlices']].transpose((3, 0, 1, 2, 4)).squeeze(),
-                                          1., params['psfPx'], 1., params['psfPxZ'])
+                    imBpass = sdf.bpass3D(im[imchannel, paramsexp['zSlices']].transpose((3, 0, 1, 2, 4)).squeeze(),
+                                          *(np.array(params['localize']['bpassLimits']) * params['localize']['psfPx']),
+                                          *(np.array(params['localize']['bpassLimits']) * params['localize']['psfPxZ']))
             else:
-                raise Exception("error: params['localizeDim'] not defined correctly")
+                raise ValueError("parameter 'localize.dimension' not defined correctly")
 
             locMax = ndimage.maximum_filter(imBpass, 3)
             locMax = (locMax == imBpass) * 1  # finds were in bandpass image the maximum value was, rest will be 0
@@ -325,27 +337,48 @@ def run_optimize_threshold(pathIn, lfn, params, paramsexp):
             locMaxCoo = tuple(np.array(np.where(locMax)))  # finds coordinates
             locMaxVal = imBpass[locMaxCoo]
             locMaxValAll.extend(locMaxVal)
-
-            spotslist += [ndimage.label(imBpass > thresh)[1] for thresh in threshvals]  # this is the most time intensive step
-            spotslistlocalmax += [np.sum(locMaxVal > thresh) for thresh in threshvals]
+            if params.get('focianalysis') and params['localize']['threshold']['method'].upper() == 'SD':
+                f = np.std(imBpass)
+            else:
+                f = 1
+            # this is the most time intensive step
+            spotslist += [ndimage.label(imBpass > thresh * f)[1] for thresh in threshvals]
+            spotslistlocalmax += [np.sum(locMaxVal > thresh * f) for thresh in threshvals]
 
         locMaxValAll = np.asarray(locMaxValAll)
-        thresh = params.get('threshold_' + color)
+        thresh = get_threshold(params, color, imBpass)
+
+        if params.get('focianalysis'):  # focianalysis
+            file = os.path.splitext(lfn[0])[0]
+            loc_max_pdf = f"{path}_{file}_pixel_values_local_maxima_{color}_" \
+                          f"{params['localize']['threshold']['method']}.pdf"
+            thresh_opt_pdf = f"{path}_{file}_threshold_optimization_{color}_" \
+                             f"{params['localize']['threshold']['method']}.pdf"
+            thresh_txt = f"{path}_{file}_threshold_optimization_{color}_" \
+                         f"{params['localize']['threshold']['method']}.txt"
+        else:
+            loc_max_pdf = f"{path}_{paramsexp['expName']}_threshold_optimization_{color}_" \
+                          f"{params['localize']['dimension']}D.pdf"
+            thresh_opt_pdf = f"{path}_{paramsexp['expName']}_pixel_values_local_maxima_{color}_" \
+                             f"{params['localize']['dimension']}D.pdf"
+            thresh_txt = f"{path}_{paramsexp['expName']}_thresholds_{color}.txt"
 
         fig = plt.figure()
         plt.plot(threshvals, spotslist)
         plt.plot(threshvals, spotslistlocalmax)
-        plt.xlabel('Threshold ' + color)
+        if params.get('focianalysis') and params['localize']['threshold']['method'].upper() == 'SD':
+            plt.xlabel(f'Threshold SD {color}')
+        else:
+            plt.xlabel(f'Threshold {color}')
         plt.ylabel('Number of spots detected')
         plt.yscale('log')
         if thresh is not None:
             plt.axvline(thresh, c='r', ls='-', label='Your threshold')
         plt.legend(loc='upper center')
-        plt.savefig(path + "_{}_threshold_optimization_{}_{}.pdf"\
-                    .format(paramsexp['expName'], color, params['localizeDim']), format='pdf')
+        plt.savefig(thresh_opt_pdf, format='pdf')
         plt.close(fig)
 
-        np.savetxt(path + "_{}_thresholds_{}.txt".format(paramsexp['expName'], color), spotslist, delimiter="\t")
+        np.savetxt(thresh_txt, spotslist, delimiter="\t")
 
         fig = plt.figure(figsize=(8, 3))
         h, x = np.histogram(np.log10(np.maximum(1e-12, locMaxValAll)), bins=np.r_[-1:np.log10(locMaxValAll.max()):.01])
@@ -366,219 +399,390 @@ def run_optimize_threshold(pathIn, lfn, params, paramsexp):
         plt.plot(10 ** x[:-1], h + 1)
         plt.legend(loc='upper left', bbox_to_anchor=(1.1, 1.))
         plt.tight_layout()
-        plt.savefig(path + "_{}_pixel_values_local_maxima_{}_{}.pdf"\
-                    .format(paramsexp['expName'], color, params['localizeDim']), format='pdf')
+        plt.savefig(loc_max_pdf, format='pdf')
         plt.close(fig)
 
 ############################################################################################################
 #### runs localize
 ############################################################################################################
 
-def run_localize(pathIn, lfn, params, paramsexp):
-    # Remove duplicates
-    def rm_duplicates_idxs(points, r):
-        if len(points) == 0:
-            return np.array([])
 
-        def dist(a, b):
-            return math.hypot(*[n - m for n, m in zip(a, b)])
-        keep = []
-        prop = rtree.index.Property()
-        prop.dimension = points.shape[1]
-        index = rtree.index.Index(properties=prop)
-        for i, p in enumerate(points):
-            nearby = index.intersection([q - r for q in p] + [q + r for q in p])
-            if all(dist(p, points[j]) >= r for j in nearby):
-                keep.append(i)
-                index.insert(i, (*p, *p))
-        return np.array(keep)
+def rm_duplicates_idxs(points, r):
+    """ Remove duplicates """
+    if len(points) == 0:
+        return np.array([])
+    elif len(points) == 1:
+        return np.array((0,))
 
-    print("Running Localize using " + params['localizeDim'])
+    def dist(a, b):
+        return math.hypot(*[n - m for n, m in zip(a, b)])
+    keep = []
+    prop = rtree.index.Property()
+    prop.dimension = points.shape[1]
+    index = rtree.index.Index(properties=prop)
+    for i, p in enumerate(points):
+        nearby = index.intersection([q - r for q in p] + [q + r for q in p])
+        if all(dist(p, points[j]) >= r for j in nearby):
+            keep.append(i)
+            index.insert(i, (*p, *p))
+    return np.array(keep)
 
-    par = ["params['threshold_cy3'] = " + str(params['threshold_cy3']), "params['threshold_cy5'] = " + str(params['threshold_cy5']),
-           "Localized in " + params['localizeDim'], "psfPx = " + str(params['psfPx']), "psfPxZ = " + str(params['psfPxZ']),
-           "MaxDist = " + str(params['maxDist']), "minSeparation = " + str(params['minSeparation']), "winSize = " + str(params['winSize']),
-           "winSizeZ = " + str(params['winSizeZ'])]
 
+def get_threshold(params, color, imBpass):
+    if params['localize']['threshold']['method'].upper() == 'SD':
+        return params['localize']['threshold'][color] * np.std(imBpass)
+    else:
+        return params['localize']['threshold'][color]
+
+
+def filter_localizations(res, filter, pxsize, psfPx, shape, deltaz=1, psfPxZ=1, zSlices=None, verbose=False):
+    if not 'z' in res:
+        res['z'], res['dz'], res['Oz'], res['dOz'], res['z_ini'] = 0, 0, 0, 0, 0
+    res['dx_um'] = res['dx'] * pxsize
+    res['dy_um'] = res['dy'] * pxsize
+    res['dz_um'] = res['dz'] * deltaz
+    res['dr_um'] = np.sqrt(res['dx_um'] ** 2 + res['dy_um'] ** 2 + res['dz_um'] ** 2)
+
+    if l := res.shape[0]:
+        q = []
+        if len(shape) == 2:
+            q.append(f'-0.5<=y<={shape[0] - 0.5} & -0.5<=x<={shape[1] - 0.5}')
+        elif len(shape) == 3:
+            q.append(f'-0.5<=y<={shape[1] - 0.5} & -0.5<=x<={shape[2] - 0.5}')
+            if zSlices is None:
+                q.append(f'-0.5<=z<={shape[0] - 0.5}')
+            elif isinstance(zSlices, Iterable):
+                q.append(f'{max(0, zSlices[0]) - 0.5}<=z<={min(zSlices[1] + 1, shape[0]) - 0.5}')
+            else:
+                q.append(f'-0.5<=z<={min(zSlices + 1, shape[0]) - 0.5}')
+        if (i := filter.get('distance')) != misc.none():
+            q.append(f'((x-x_ini)/{psfPx}) ** 2 + ((y-y_ini)/{psfPx}) ** 2 + ((z-z_ini)/{psfPxZ}) ** 2 < {i ** 2}')
+        if (i := filter.get('intensity')) != misc.none():
+            q.append(f'Ii>{i}')
+        if (i := filter.get('dintensity')) != misc.none():
+            q.append(f'dIi/abs(Ii)<{i}')
+        if (i := filter.get('peak_intensity')) != misc.none():
+            q.append(f'Ip>{i}')
+        if (i := filter.get('dpeak_intensity')) != misc.none():
+            q.append(f'dIp/abs(Ip)<{i}')
+        if (i := filter.get('precision')) != misc.none():
+            q.append(f'dr_um<{i}')
+        if (i := filter.get('offset')) != misc.none():
+            q.append(f'O>{i}')
+        if (i := filter.get('doffset')) != misc.none():
+            q.append(f'dO/abs(O)<{i}')
+        if (i := filter.get('tilt')) != misc.none():
+            q.append(f'Ox<{i}&Oy<{i}&Oz<{i}')
+        if (i := filter.get('dtilt')) != misc.none():
+            q.append(f'dOx/abs(Ox)<{i}&dOy/abs(Oy)<{i}&dOz/abs(Oz)<{i}')
+        if (i := filter.get('R2')) != misc.none():
+            q.append(f'R2>{i}')
+        if (i := filter.get('R2_peak')) != misc.none():
+            q.append(f'R2_peak>{i}')
+        if (i := filter.get('R2_background')) != misc.none():
+            q.append(f'R2_background>{i}')
+        if (i := filter.get('s')) != misc.none():
+            q.append(f'{i[0]}<s<{i[1]}')
+        if (i := filter.get('ds')) != misc.none():
+            q.append(f'ds<{i}')
+        if (i := filter.get('sz')) != misc.none():
+            q.append(f'{i[0]}<sz<{i[1]}')
+        if (i := filter.get('dsz')) != misc.none():
+            q.append(f'dsz<{i}')
+        if q:
+            res = res.query('&'.join(q)).copy()
+        if (s := filter.get('separation')) != misc.none():
+            idxs = rm_duplicates_idxs(res[['x', 'y', 'z']].to_numpy(float) / (psfPx, psfPx, psfPxZ), s)
+            res = res.iloc[idxs].copy()
+        if verbose:
+            print(f'Filter is removing {l - res.shape[0]} of {l} spots.')
+    return res
+
+
+def add_cell_as_column(df, path, fn):
+    file = os.path.splitext(fn)[0]
+    nuc_file = get_tif(f"{path}_{file}_max_nucleus_mask.tif")
+    cell_file = get_tif(f"{path}_{file}_max_cell_mask.tif")
+    if nuc_file:
+        with imr(nuc_file, dtype=int) as im:
+            nuc_mask = im(0)
+        try:
+            df['nucleus'] = [nuc_mask[int(np.round(row['y'])), int(np.round(row['x']))] for _, row in df.iterrows()]
+        except IndexError:
+            df['nucleus'] = 0
+    else:
+        warn(f'Nucleus mask for {fn} not found, adding nucleus number to results skipped.')
+    if cell_file:
+        with imr(cell_file, dtype=int) as im:
+            cell_mask = im(0)
+        try:
+            df['cell'] = [cell_mask[int(np.round(row['y'])), int(np.round(row['x']))] for _, row in df.iterrows()]
+        except IndexError:
+            df['cell'] = 0
+    else:
+        warn(f'Cell mask for {fn} not found, adding cell number to results skipped')
+
+    if cell_file and nuc_file:
+        # Warn for inconsistencies between cell and nucleus masks
+        c, n = set(cell_mask.flatten()), set(nuc_mask.flatten())
+        if not c == n:
+            if c - n:
+                warn(f'Cell(s) {c - n} in {path}_{file} do(es) not have a nucleus.')
+            if n - c:
+                warn(f'Nucle(us/i) {n - c} in {path}_{file} do(es) not have a cell.')
+    return df
+
+
+def run_localize(pathIn, lfn, params, paramsexp, channel_names=None):
+    if channel_names is None:
+        channel_names = ('cy3', 'cy5')
+
+    def output_files(path, fn, color):
+        file = os.path.splitext(fn)[0]
+        if params.get('focianalysis'):  # focianalysis
+            fnTxt = f"{path}_{file}_loc_results_{color}_{params['localize']['threshold']['method']}.txt"
+            fnTif = f"{path}_{file}_loc_results_{color}_{params['localize']['threshold']['method']}.tif"
+            fnRoi = f"{path}_{file}_loc_results_{color}_{params['localize']['threshold']['method']}.roi"
+        else:
+            fnTxt = f'{path}_{file}_loc_results_{color}.txt'
+            fnTif = f'{path}_{file}_loc_results_{color}.tif'
+            fnRoi = f'{path}_{file}_loc_results_{color}.roi'
+        return fnTxt, fnTif, fnRoi
+
+    print(f"Running Localize using {params['localize']['dimension']}D")
+
+    par = yaml.dump(params['localize'])
     for channel in params['channelsToAnalyze']:
-        color = ['cy3', 'cy5'][channel]
+        color = channel_names[channel]
         path = os.path.join(paramsexp['pathOut'], paramsexp['date'])
 
-        if params['localizeDim'].startswith('2'):  ### localize in 2D
+        if params['localize']['dimension'] == 2:  ### localize in 2D
             for fn in lfn:
-                # Output files
-                fnTxt = path + '_{}_loc_results_{}.txt'.format(fn, color)
-                fnTif = path + '_{}_loc_results_{}.tif'.format(fn, color)
+                fnTxt, fnTif, fnRoi = output_files(path, fn, color)
                 if not os.path.exists(fnTxt):
+                    # open image
+                    with imr(os.path.join(pathIn, fn), dtype=float) as im:
+                        pxsize = im.pxsize
                     # save 6 frame image: original image, imBpass, imBinary (areas above threshold), local maxima,
                     # maxima above threshold and fitted spots. These are useful for optimizing the threshold.
-                    with IJTiffWriter(fnTif, (6, 1, 1), dtype='uint16') as tif:
-                        # open image
-                        with imr(path + '_{}_max.tif'.format(fn), dtype=float) as im:
+                    with IJTiffFile(fnTif, (6, 1, 1), dtype='uint16', pxsize=im.pxsize) as tif:
+                        # TODO: check transforms, also fit first, then transform
+                        with imr(f'{path}_{fn}_max.tif',
+                                 transform=os.path.exists(os.path.join(pathIn, "beads.czi")), dtype=float) as im:
                             shape = im.shape[:2]
-                            imBpass = sdf.bpass(im(channel), 0.75 * params['psfPx'], params['psfPx'])  # bandpass image to find spots
+                            # bandpass image to find spots
+                            imBpass = sdf.bpass(im(channel), *(np.array(params['localize']['bpassLimits']) *
+                                                               params['localize']['psfPx']))
                             tif.save(im(channel).astype('uint16'), 0, 0, 0)
                             tif.save(imBpass.astype('uint16'), 1, 0, 0)
+                            thresh = get_threshold(params, color, imBpass)
 
-                            thresh = params['threshold_' + color]
-    
                             # find local maxima
                             locMax = ndimage.maximum_filter(imBpass, 3)
-                            locMax = (locMax == imBpass) * 1  # finds were in bandpass image the maximum value was, rest will be 0
+                            # finds were in bandpass image the maximum value was, rest will be 0
+                            locMax = (locMax == imBpass) * 1
                             locMax[0, :], locMax[-1, :], locMax[:, 0], locMax[:, -1] = 0, 0, 0, 0
                             tif.save(locMax, 3, 0, 0)
                             locMaxCoo = tuple(np.array(np.where(locMax)))  # finds coordinates
                             locMaxVal = imBpass[locMaxCoo]
                             yG, xG, valG = tuple(np.array(locMaxCoo + (locMaxVal,))[:, np.where(locMaxVal > thresh)])
                             cooGuess = np.r_[xG, yG].T
-    
-                            # for optimzing threshold
+
+                            # for optimizing threshold
                             imGuess = np.zeros(shape, dtype='uint16')
                             for a in cooGuess:
                                 imGuess[int(a[1]), int(a[0])] = 1  #
                             tif.save(imGuess, 4, 0, 0)
                             tif.save((imBpass > thresh), 2, 0, 0)  # Binary image after fixed threshold
-    
-                            # generate an ROI and it's coordinates on demand
+
+                            # generate an ROI and its coordinates on demand
                             def ROIgen(im, cooGuess, winSize):
                                 for cg in cooGuess:
-                                    X0 = [max(0, int(c - winSize)) for c in cg]
-                                    X1 = [min(int(c + winSize), l) for c, l in zip(cg, shape)]
-                                    yield cg - X0, X0, im[X0[0]:X1[0], X0[1]:X1[1]].astype('float')
-    
-                            @parfor(ROIgen(im(channel), cooGuess, params['winSize']), (params,), length=len(cooGuess), nP=8, bar=False)
-                            def fun(ROIgen, params):
-                                cg, x, ROI = ROIgen
-                                intensity, coo, tilt = sdf.GaussianMaskFit2(ROI, cg, params['psfPx'], winSize=params['winSize'])
-                                fit = intensity > 0
-                                if not fit:
-                                    intensity, coo, tilt = sdf.GaussianMaskFit2(ROI, cg, params['psfPx'], 0, winSize=params['winSize'])  # if it does not converge, fit at position of initial guess
-                                # Keep only if it converged close to the inital guess
-                                if intensity > 0 and sum(((coo - cg) / params['psfPx']) ** 2) < (params['maxDist'] * params['psfPx']) ** 2:
-                                    return np.r_[intensity, coo+x, tilt, fit]
+                                    window, roi = sdf.crop[im, cg[1] - winSize:cg[1] + winSize,
+                                                           cg[0] - winSize:cg[0] + winSize]
+                                    yield roi.astype(float), window[::-1, 0], cg - window[::-1, 0]
 
-                        fitResults = np.array([g for g in fun if not g is None])
-                        fitResultsPx = np.array([f/i for f, i in zip(fitResults.T[1:4], (params['psfPxZ'], params['psfPx'], params['psfPx']))]).T
-                        idxs = rm_duplicates_idxs(fitResultsPx, params['minSeparation'])
-                        fitResults = fitResults[idxs]
-    
+                            @parfor(ROIgen(im(channel), cooGuess, params['localize']['winSize']), (params,),
+                                    length=len(cooGuess), nP=8, bar=False)
+                            def fun(ROIgen, params):
+                                psfPx = params['localize']['psfPx']
+                                distance = params['localize']['filter'].get('distance')
+                                max_distance = None if distance is None else distance / psfPx
+                                fit_params = params['localize']['fit']
+                                fit0 = sdf.GaussianMaskFit(*ROIgen, psfPx, params['localize']['winSize'],
+                                                           max_distance=max_distance, optimize_width=False,
+                                                           correct_fit_window=params['localize']['correct_fit_window'],
+                                                           refine_fit=params['localize']['refine_fit'],
+                                                           max_sigma=fit_params.get('max_sigma'),
+                                                           fit_weight_sigma=fit_params.get('fit_weight_sigma'))
+                                if params['localize']['optimize_width']:
+                                    fit1 = sdf.GaussianMaskFit(*ROIgen, psfPx, params['localize']['winSize'],
+                                                               max_distance=max_distance, optimize_width=True,
+                                                               reset_if_not_fit=False)
+                                    return fit1.data if fit1.fit else fit0.data
+                                else:
+                                    return fit0.data
+
+                        # concatenate results. If no spots are detected, use empty dataframe.
+                        fitResults = pandas.concat(fun, ignore_index=True) if fun else sdf.GaussianMaskFit.empty_data(2)
+                        fitResults = add_cell_as_column(fitResults, path, fn)
+                        fitResults.to_csv(fnTxt.replace('.txt', '_unfiltered.txt'), sep='\t', index=False)
+                        fitResults = filter_localizations(fitResults, params['localize']['filter'], pxsize,
+                                                          params['localize']['psfPx'], shape, verbose=True)
+
                         # Save the results in a text file
-                        # columns are: integrated intensity, x position, y position, offset of tilted plane, x tilt, y tilt, fit (1 for fit, 0 for forced fit)
-                        np.savetxt(fnTxt, fitResults, delimiter="\t")
-    
+                        fitResults.to_csv(fnTxt, sep='\t', index=False)
+
+                        # Save the results in a roi file
+                        roi_coo_guess = pandas.DataFrame(cooGuess, columns=('x', 'y'))
+                        roi_coo_guess['C'] = 4
+                        roi_fit_results = fitResults[['x', 'y']].copy()
+                        roi_fit_results['C'] = 5
+                        save_roi(fnRoi, pandas.concat((roi_fit_results, roi_coo_guess)),
+                                 (*im.shape[1:], 3, im.shape[0], 1), 'xyC__')
+
                         # Compute and save image results as a tif file
                         imSpots = np.zeros(shape, dtype='uint16')  # empty image
-                        for a in fitResults:
-                            imSpots[int(round(a[2])), int(round(a[1]))] = 1  # add spots to image
+                        imSpots[round(fitResults['y']).astype(int), round(fitResults['x']).astype(int)] = 1
                         tif.save(imSpots, 5, 0, 0)
 
-                    print('\n\n*** Found {} spots in channel {}. ***'.format(len(fitResults), color))
-                    print('Results saved in {} and {}.'.format(fnTxt, fnTif))
+                    print(f'*** Found {len(fitResults)} spots in channel {color}. ***')
+                    print(f'Results saved in {fnTxt} and {fnTif}.')
+                    print('\n\n')
 
-                    par.append('Image {} in channel {} has threshold: {}, found {} spots'.format(fn, color,
-                                                        params['threshold_' + color], len(fitResults)))
+                    par += f'\nImage {fn} in channel {color} has threshold: {get_threshold(params, color, imBpass)}, ' \
+                           f'found {len(fitResults)} spots'
                     if len(fitResults):
-                        par[-1] += ', of which {:.0f} ({:.2f}%) from fit.'.format(sum(np.array(fitResults)[:, -1]),
-                                                        sum(np.array(fitResults)[:, -1]) * 100 / len(fitResults))
+                        par += f", of which {sum(fitResults['fit']):.0f} " \
+                               f"({100 * sum(fitResults['fit']) / len(fitResults):.2f}%) from fit."
                     else:
-                        par[-1] += '.'
+                        par += '.'
 
-        elif params['localizeDim'].startswith('3'):  ### localize in 3D
+        else:  ### localize in 3D
             for fn in lfn:
-                # Output files
-                fnTxt = path + '_{}_loc_results_{}.txt'.format(fn, color)
-                fnTif = path + '_{}_loc_results_{}.tif'.format(fn, color)
+                fnTxt, fnTif, fnRoi = output_files(path, fn, color)
                 if not os.path.exists(fnTxt):
-                    with IJTiffWriter(fnTif, (3, params['zSlices'], 1), dtype='uint16') as tif:
-                        with imr(pathIn + fn, dtype=float) as jm:
-                            imchannel = sorted(range(jm.shape[2]), key=lambda i: jm.cnamelist[i])[channel]
-                            im = np.array([jm(imchannel, z) for z in np.r_[:params['zSlices']]])
-                        for z, zim in enumerate(im):
+                    with imr(os.path.join(pathIn, fn), dtype=float) as jm:
+                        im = jm[channel, :, 0].squeeze((2, 4)).transpose(2, 0, 1)
+                        z_slices = jm.get_czt(0, paramsexp['zSlices'], 0)[1]
+                        pxsize, deltaz = jm.pxsize, jm.deltaz
+                    with IJTiffFile(fnTif, (3, len(z_slices), 1), dtype='uint16', pxsize=pxsize, deltaz=deltaz) as tif:
+                        for z, zim in enumerate(im[z_slices]):
                             tif.save(zim, 0, z, 0)
-                        imBpass = sdf.bpass3D(im, 1., params['psfPx'], 1., params['psfPxZ'], zMirror=4)  # *66000 # !!!
+                        imBpass = sdf.bpass3D(im,
+                                        *(np.array(params['localize']['bpassLimits']) * params['localize']['psfPx']),
+                                        *(np.array(params['localize']['bpassLimits']) * params['localize']['psfPxZ']))
 
                         # find local maxima
                         locMax = ndimage.maximum_filter(imBpass, 3)
-                        locMax = (locMax == imBpass) * 1  # finds were in bandpass image the maximum value was, rest will be 0
-                        locMax[0,:,:], locMax[-1,:,:], locMax[:, 0,:], locMax[:, -1,:], locMax[:,:, 0], locMax[:,:, -1] = 0, 0, 0, 0, 0, 0
+                        # finds were in bandpass image the maximum value was, rest will be 0
+                        locMax = (locMax == imBpass) * 1
+                        locMax[0, :, :], locMax[-1, :, :] = 0, 0
+                        locMax[:, 0, :], locMax[:, -1, :] = 0, 0
+                        locMax[:, :, 0], locMax[:, :, -1] = 0, 0
                         locMaxCoo = tuple(np.array(np.where(locMax)))  # finds coordinates
                         locMaxVal = imBpass[locMaxCoo]
-
-                        thresh = params['threshold_' + color]
+                        thresh = get_threshold(params, color, imBpass)
 
                         zG, yG, xG, valG = tuple(np.array(locMaxCoo + (locMaxVal,))[:, np.where(locMaxVal > thresh)])
                         cooGuess = np.r_[zG, yG, xG].T  # for 2D x and y should be swapped!
 
-                        zDepth = (params['winSizeZ'] - 1) // 2
+                        zDepth = (params['localize']['winSizeZ'] - 1) // 2
 
-                        intersect = [value for value in zG[0] if value in set(list(range(params['zSlices'])[0:zDepth]) + list(range(params['zSlices'])[-zDepth:]))]
+                        intersect = [value for value in zG[0] if value in set(z_slices[:zDepth] + z_slices[-zDepth:])]
 
-                        # generate an ROI and it's coordinates on demand
+                        # generate an ROI and its coordinates on demand
                         def ROIgen(im, cooGuess, winSize, winSizeZ):
                             for cg in cooGuess:
-                                X0 = [max(0, int(c - q)) for c, q in zip(cg, (winSizeZ, winSize, winSize))]
-                                X1 = [min(int(c + q), l) for c, l, q in zip(cg, im.shape, (winSizeZ, winSize, winSize))]
-                                yield cg-X0, X0, im[X0[0]:X1[0], X0[1]:X1[1], X0[2]:X1[2]].astype('float')
+                                window, roi = sdf.crop[im, cg[0] - winSizeZ:cg[0] + winSizeZ,
+                                                       cg[1] - winSize:cg[1] + winSize, cg[2] - winSize:cg[2] + winSize]
+                                yield roi.astype(float), window[:, 0], cg - window[:, 0]
 
-                        # fit each spot with 3D gaussian with tilted plane. The GaussianMaskFit3D function is described in spotDetection_Functions.py. Write spots to parameter fitResults.
-                        @parfor(ROIgen(im, cooGuess, params['winSize'], params['winSizeZ']), (params,),
-                                length=len(cooGuess), nP=8, bar=False)
+                        # fit each spot with 3D gaussian with tilted plane.
+                        # The GaussianMaskFit3D function is described in spotDetection_Functions.py.
+                        # Write spots to parameter fitResults.
+                        @parfor(ROIgen(im, cooGuess, params['localize']['winSize'], params['localize']['winSizeZ']),
+                                (params,), length=len(cooGuess), nP=8, bar=False)
                         def fun(ROIgen, params):
-                            cg, x, ROI = ROIgen
-                            intensity, coo, tilt = sdf.GaussianMaskFit3D(ROI, cg, params['psfPx'], params['psfPxZ'],
-                                                        winSize=params['winSize'], winSizeZ=params['winSizeZ'])
-                            fit = intensity > 0
-                            if not fit:
-                                intensity, coo, tilt = sdf.GaussianMaskFit3D(ROI, cg, params['psfPx'], params['psfPxZ'], 0,
-                                                        winSize=params['winSize'], winSizeZ=params['winSizeZ'])  # if it does not converge, fit at position of initial guess
-                            # Keep only if it converged close to the inital guess
-                            if intensity > 0 and sum(((coo - cg) / np.r_[params['psfPxZ'], params['psfPx'], params['psfPx']]) ** 2)\
-                                    < (params['maxDist'] * params['psfPx']) ** 2:
-                                return np.r_[intensity, coo+x, tilt, fit]
+                            psfPx, psfPxZ = params['localize']['psfPx'], params['localize']['psfPxZ']
+                            distance = params['localize']['filter'].get('distance')
+                            if distance is not None:
+                                max_distance, max_distance_z = distance / psfPx, distance / psfPxZ
+                            else:
+                                max_distance, max_distance_z = None, None
+                            fit_params = params['localize']['fit']
+                            fit0 = sdf.GaussianMaskFit(*ROIgen, psfPx, params['localize']['winSize'],
+                                                       psfPxZ, params['localize']['winSizeZ'],
+                                                       max_distance=max_distance, max_distance_z=max_distance_z,
+                                                       optimize_width=False,
+                                                       correct_fit_window=params['localize']['correct_fit_window'],
+                                                       refine_fit=params['localize']['refine_fit'],
+                                                       max_sigma=fit_params.get('max_sigma'),
+                                                       max_sigma_z=fit_params.get('max_sigma_z'),
+                                                       fit_weight_sigma=fit_params.get('fit_weight_sigma'))
+                            if params['localize']['optimize_width']:
+                                fit1 = sdf.GaussianMaskFit(*ROIgen, psfPx, params['localize']['winSize'],
+                                                           psfPxZ, params['localize']['winSizeZ'],
+                                                           max_distance=max_distance, max_distance_z=max_distance_z,
+                                                           optimize_width=True, reset_if_not_fit=False)
+                                return fit1.data if fit1.fit else fit0.data
+                            else:
+                                return fit0.data
 
-                        fitResults = np.array([g for g in fun if not g is None])
-                        fitResultsPx = np.array([f/i for f, i in zip(fitResults.T[1:4], (params['psfPxZ'], params['psfPx'], params['psfPx']))]).T
-                        idxs = rm_duplicates_idxs(fitResultsPx, params['minSeparation'])
-                        fitResults = fitResults[idxs] if len(idxs) else []
+                        # concatenate results. If no spots are detected, use empty dataframe.
+                        fitResults = pandas.concat(fun, ignore_index=True) if fun else sdf.GaussianMaskFit.empty_data(3)
+                        fitResults = add_cell_as_column(fitResults, path, fn)
+                        fitResults.to_csv(fnTxt.replace('.txt', '_unfiltered.txt'), sep='\t', index=False)
+                        fitResults = filter_localizations(fitResults, params['localize']['filter'], pxsize,
+                                                          params['localize']['psfPx'], im.shape, deltaz,
+                                                          params['localize']['psfPxZ'], (z_slices[0], z_slices[-1]),
+                                                          verbose=True)
 
                         # Save the results in a text file
-                        # columns are: integrated intensity, x position, y position, z position, offset of tilted plane, x tilt, y tilt, z tilt, fit (1 = fit, 0 = forced fit)
-                        if len(fitResults):
-                            fitResults = np.array(fitResults)[:, [0, 3, 2, 1, 4, 7, 6, 5, 8]]  # re-order columns
-                        np.savetxt(fnTxt, fitResults, delimiter="\t")
+                        fitResults.to_csv(fnTxt, sep='\t', index=False)
 
-                        # for optimzing threshold
+                        # Save the results in a roi file
+                        roi_coo_guess = pandas.DataFrame(cooGuess, columns=('z', 'y', 'x'))
+                        roi_coo_guess['C'] = 1
+                        roi_fit_results = fitResults[['x', 'y', 'z']].copy()
+                        roi_fit_results['C'] = 2
+                        save_roi(fnRoi, pandas.concat((roi_fit_results, roi_coo_guess)),
+                                 (*im.shape[1:], 3, im.shape[0], 1), 'xyCz_')
+
+                        # for optimizing threshold
                         imGuess = np.zeros(im.shape, dtype='uint16')
                         for a in cooGuess:
                             imGuess[int(a[0]), int(a[1]), int(a[2])] = 1  #
-                        for z, zim in enumerate(imGuess):
+                        for z, zim in enumerate(imGuess[z_slices]):
                             tif.save(zim, 1, z, 0)
 
                         # Compute and save image results as a tif file
                         imSpots = np.zeros(im.shape, dtype='uint16')  # empty image
-                        for a in fitResults:
-                            imSpots[int(round(a[3])), int(round(a[2])), int(round(a[1]))] = 1  # add spots to image
-                        for z, zim in enumerate(imSpots):
+                        imSpots[round(fitResults['z']).astype(int), round(fitResults['y']).astype(int),
+                                round(fitResults['x']).astype(int)] = 1
+                        for z, zim in enumerate(imSpots[z_slices]):
                             tif.save(zim, 2, z, 0)
 
-                    print('\n\n*** Found {} spots in channel {}. ***'.format(len(fitResults), color))
-                    print('Results saved in {} and {}.'.format(fnTxt, fnTif))
+                    print(f'*** Found {len(fitResults)} spots in channel {color}. ***')
+                    print(f'Results saved in {fnTxt} and {fnTif}.')
                     if intersect:
-                        print('\nWarning: {} out of {} spots were at outer frames of z focus and may not have been fit!'
-                              .format(len(intersect), len(zG[0])))
+                        print(f'Warning: {len(intersect)} out of {len(zG[0])} spots were at outer frames of z focus '
+                              'and may not have been fit!')
+                    print('\n\n')
 
-                    par.append('Image {} in channel {} has threshold: {}, found {} spots'.\
-                               format(fn, color, params['threshold_' + color], len(fitResults)))
+                    par += f'\nImage {fn} in channel {color} has threshold: {get_threshold(params, color, imBpass)}, ' \
+                           f'found {len(fitResults)} spots'
                     if len(fitResults):
-                        par[-1] += ', of which {:.0f} ({:.2f}%) from fit. {} spots where at outer frames of z focus'.\
-                            format(sum(np.array(fitResults)[:, -1]),
-                                   sum(np.array(fitResults)[:, -1]) * 100 / len(fitResults), len(intersect))
+                        par += f", of which {sum(fitResults['fit']):.0f} "\
+                               f"({100 * sum(fitResults['fit']) / len(fitResults):.2f}%) from fit. "\
+                               f"{len(intersect)} spots where at outer frames of z focus."
                     else:
-                        par[-1] += '.'
+                        par += '.'
 
         # save parameters localize
-        parameterfile = paramsexp['pathOut'] + paramsexp['date'] + "_" + "localize_parameters.txt"
-        np.savetxt(parameterfile, par, delimiter="\n", fmt="%s")
+        parameterfile = f"{os.path.join(paramsexp['pathOut'], paramsexp['date'])}_localize_parameters.txt"
+        with open(parameterfile, 'w') as file:
+            file.write(par)
 
 
 def get_tif(file):  # tif or tiff
@@ -596,40 +800,50 @@ def get_tif(file):  # tif or tiff
 #### makes outlines on cell and nucleus and boxes around localized spots
 ############################################################################################################
 
-def make_mask_image(lfn, params, paramsexp):
+def make_mask_image(lfn, params, paramsexp, colors=None):
     print("Combining mask with image")
-    colors = ('cy3', 'cy5')
+    if colors is None:
+        colors = 'cy3', 'cy5'
     for fn in lfn:
+        file = os.path.splitext(fn)[0]
         path = os.path.join(paramsexp['pathOut'], paramsexp['date'])
-        if not os.path.exists(path + "_{}_mask_cell+nuc+spots.tif".format(fn)):
-            maximagefile = path + "_{}_max.tif".format(fn)
-            locfile = [path + "_{}_loc_results_{}.txt".format(fn, colors[c]) for c in params['channelsToAnalyze']]
-            nucleusfile = get_tif(path + "_{}_max_nucleus_mask.tif".format(fn))
-            cellfile = get_tif(path + "_{}_max_cell_mask.tif".format(fn))
+        if not os.path.exists(f"{path}_{file}_mask_cell+nuc+spots.tif"):
+            maximagefile = f"{path}_{file}_max.tif"
+            if params.get('focianalysis'):  # focianalysis
+                locfile = [f"{path}_{file}_loc_results_{colors[c]}_{params['localize']['threshold']['method']}.txt"
+                           for c in params['channelsToAnalyze']]
+            else:
+                locfile = [f"{path}_{file}_loc_results_{colors[c]}.txt" for c in params['channelsToAnalyze']]
+            nucleusfile = get_tif(f"{path}_{file}_max_nucleus_mask.tif")
+            cellfile = get_tif(f"{path}_{file}_max_cell_mask.tif")
 
-            outfileMask = paramsexp['pathOut'] + paramsexp['date'] + "_" + fn + "_mask_cell+nuc+spots.tif"
+            outfileMask = f"{path}_{file}_mask_cell+nuc+spots.tif"
+            outfileRoi = f"{path}_{file}_mask_cell+nuc+spots.roi"
             with imr(maximagefile, dtype='uint16') as im, \
                 imr(nucleusfile, dtype='uint16') as imn, imr(cellfile, dtype='uint16') as imc, \
-                IJTiffWriter(outfileMask, (im.shape[2] + len(locfile) + 1, 1, 1), dtype='uint16') as tif:
-
-                maskarraynuc = (imn(0) > 0).astype(int)
-                maskarraynuc = (maskarraynuc-binary_erosion(maskarraynuc, np.ones((3, 3))))
-                maskarraycell = (imc(0) > 0).astype(int)
-                maskarraycell = (maskarraycell - binary_erosion(maskarraycell, np.ones((3, 3))))
-                maskarraytot = maskarraycell + maskarraynuc
-                maskarraytot *= 60
-
-                for c in range(im.shape[2]):
+                IJTiffFile(outfileMask, (im.shape[2] + len(locfile) + 2, 1, 1), dtype='uint16', pxsize=im.pxsize,
+                           deltaz=im.deltaz) as tif:
+                for c in range(im.shape[2]):  # copy frames
                     tif.save(im(c), c, 0, 0)
-                tif.save(maskarraytot, im.shape[2], 0, 0)
-                for c, l in enumerate(locfile, im.shape[2]+1):
-                    data = np.loadtxt(l)
+
+                for i, lbl in enumerate((imc(0), imn(0))):  # draw cell and nucleus outlines
+                    mask = np.zeros(im.shape[:2])
+                    lbl_n = np.unique(lbl)
+                    for cell in lbl_n[lbl_n > 0]:
+                        mask += (lbl == cell).astype(int) - binary_erosion(lbl == cell, np.ones((3, 3)))
+                    tif.save(mask, im.shape[2] + i, 0, 0)
+
+                datas = []
+                for c, l in enumerate(locfile, im.shape[2] + 2):  # draw dots for localisations
+                    data = pandas.read_table(l)
                     Pos = np.zeros(im.shape[:2])
-                    if data.shape[0] != 0 and np.shape(data) != (9,):
-                        Loc_xy = np.round(data[:, 1:3]).astype(int)
-                        for spot in Loc_xy:
-                            Pos[spot[1], spot[0]] = 1
+                    Pos[round(data['y']).astype(int), round(data['x']).astype(int)] = 1
                     tif.save(Pos, c, 0, 0)
+                    data['C'] = c
+                    if not data.empty:
+                        datas.append(data)
+                if datas:
+                    save_roi(outfileRoi, pandas.concat(datas), im.shape[:2] + tif.shape, 'xyC__')
 
 
 ############################################################################################################
@@ -655,12 +869,12 @@ def make_montage(path, lfn, outfile, suffix, scale=4, colormap=None):
         im = [imr(path + f'_{fn}_{suffix}.tif', dtype='int16') for fn in lfn]
         shapeIm = im[0].shape[:2]
         nchannels = im[0].shape[2]
+        colors = ('red', 'lime', 'blue', 'magenta', 'cyan', 'yellow')[:nchannels] + ('white',)
         shape = ((yMax - yMin + 1) * shapeIm[0], (xMax - xMin + 1) * shapeIm[1])
-        channels = (0, 1, 2, 4, 5, 6)[:nchannels]
-        nchannels = max(4, nchannels + 1) if colormap is None else nchannels
-
-        with IJTiffWriter(outfile, (nchannels, 1, 1), 'uint16', colormap) as tif:
-            for c in channels:
+        kwargs = {'colors': colors} if colormap is None else {'colormap': colormap}
+        with IJTiffFile(outfile, (nchannels + (colormap is None), 1, 1), 'uint16', pxsize=im[0].pxsize/scale,
+                        deltaz=im[0].deltaz, **kwargs) as tif:
+            for c in range(nchannels):
                 montage = np.zeros(shape, dtype='uint16')
                 for i, (fm, x, y) in enumerate(zip(im, posX, posY)):
                     jm = np.flip(np.rot90(fm(c), k=-1, axes=(0, 1)), axis=1)
@@ -682,7 +896,7 @@ def make_montage(path, lfn, outfile, suffix, scale=4, colormap=None):
                 text[::shapeIm[0] // scale, :] = 1
                 text[:, ::shapeIm[1] // scale] = 1
                 plt.imshow(text)
-                tif.save((65535 * text).astype('uint16'), 3, 0, 0)
+                tif.save((65535 * text).astype('uint16'), nchannels, 0, 0)
         for fm in im:
             fm.close()
 
@@ -801,6 +1015,7 @@ def CellCycle(lfn, params, paramsexp):
                 cellFile = get_tif(path + "_{}_max_cell_mask.tif".format(fn))
                 with imr(maxFile) as im:
                     img_dapi = im(-1)
+                    pxsize, deltaz, timeinterval = im.pxsize, im.deltaz, im.timeinterval
                 with imr(nucleusFile, dtype='uint16') as im:
                     mask_nuc = im(0)
                 with imr(cellFile, dtype='uint16') as im:
@@ -818,7 +1033,7 @@ def CellCycle(lfn, params, paramsexp):
                         if threshold[0] <= i < threshold[1]:
                             nmask += n * (mask_nuc == n)
                             cmask += n * (mask_cell == n)
-                    res.append((nmask, cmask))
+                    res.append((nmask, cmask, pxsize, deltaz, timeinterval))
                 return res
 
             with parpool(fun, (get_tif, path, CellCycleStages, thresholds, order)) as pool:
@@ -826,28 +1041,39 @@ def CellCycle(lfn, params, paramsexp):
                     pool[fn] = fn  # adding work to the parallel pool
                 for _ in tqdm(lfn, desc='Writing cell cycle labels'):
                     fn, images = pool.get_newest()  # taking results from pool in fifo order and save as tifs
-                    for c, (mask_nuc, mask_cell) in zip(CellCycleStages, images):
+                    for c, (mask_nuc, mask_cell, pxsize, deltaz, timeinterval) in zip(CellCycleStages, images):
                         if params['manualThreshold'] in (None, 'None'):
                             p = os.path.join(paramsexp['pathOut'], c, paramsexp['date'])
                         else:
                             p = os.path.join(paramsexp['pathOut'], 'ManualThreshold', c, paramsexp['date'])
                         tiffwrite(p + "_{}_max_nucleus_mask_threshold.tif".format(fn),
-                                  mask_nuc.astype('uint16'), colormap='glasbey')
+                                  mask_nuc.astype('uint16'), colormap='glasbey', pxsize=pxsize, deltaz=deltaz)
                         tiffwrite(p + "_{}_max_cell_mask_threshold.tif".format(fn),
-                                  mask_cell.astype('uint16'), colormap='glasbey')
+                                  mask_cell.astype('uint16'), colormap='glasbey', pxsize=pxsize, deltaz=deltaz)
 
 
 ############################################################################################################
 #### calculate transcription sites
 ############################################################################################################
 
+def get_common_path_out(params, paramsexp, CellCycleStages, c):
+    if params['CellCycle'] == 0:
+        return os.path.join(paramsexp['pathOut'], f"{paramsexp['date']}_{paramsexp['expName']}")
+    elif params['CellCycle'] == 1 and params['manualThreshold'] is None:
+        return os.path.join(paramsexp['pathOut'], CellCycleStages[c], f"{paramsexp['date']}_{paramsexp['expName']}")
+    elif params['CellCycle'] == 1 and params['manualThreshold'] is not None:
+        return os.path.join(paramsexp['pathOut'], 'ManualThreshold', CellCycleStages[c],
+                            f"{paramsexp['date']}_{paramsexp['expName']}")
+
+
 def calculate_TS(lfn, params, paramsexp):
+    # TODO: use localize file and pandas to do this much simpler
     print("Calculating transcription sites")
 
     CellCycleStages = params['CellCycleStages']
     if params['CellCycle'] == 0: Z = 1
-    elif params['CellCycle'] == 1 and params['manualThreshold'] == 'None': Z = len(CellCycleStages)
-    elif params['CellCycle'] == 1 and params['manualThreshold'] != 'None': Z = 1
+    elif params['CellCycle'] == 1 and params['manualThreshold'] is None: Z = len(CellCycleStages)
+    elif params['CellCycle'] == 1 and params['manualThreshold'] is not None: Z = 1
 
     path = os.path.join(paramsexp['pathOut'], paramsexp['date'])
 
@@ -863,19 +1089,19 @@ def calculate_TS(lfn, params, paramsexp):
             if params['MaskTS'] == "nucleus":
                 if params['CellCycle'] == 0:
                     nucleusfile = get_tif(path + "_{}_max_nucleus_mask.tif".format(fn))
-                elif params['CellCycle'] == 1 and params['manualThreshold'] == 'None':
+                elif params['CellCycle'] == 1 and params['manualThreshold'] is None:
                     nucleusfile = os.path.join(paramsexp['pathOut'], CellCycleStages[c],
                                                 paramsexp['date'] + "_{}_max_nucleus_mask_threshold.tif".format(fn))
-                elif params['CellCycle'] == 1 and params['manualThreshold'] != 'None':
+                elif params['CellCycle'] == 1 and params['manualThreshold'] is not None:
                     nucleusfile = os.path.join(paramsexp['pathOut'], 'ManualThreshold', CellCycleStages[c],
                                                 paramsexp['date'] + "_{}_max_nucleus_mask_threshold.tif".format(fn))
             elif params['MaskTS'] == "cell":
                 if params['CellCycle'] == 0:
                     nucleusfile = get_tif(path + "_{}_max_cell_mask.tif".format(fn))
-                elif params['CellCycle'] == 1 and params['manualThreshold'] == 'None':
+                elif params['CellCycle'] == 1 and params['manualThreshold'] is None:
                     nucleusfile = os.path.join(paramsexp['pathOut'], CellCycleStages[c],
                                                 paramsexp['date'] + "_{}_max_cell_mask_threshold.tif".format(fn))
-                elif params['CellCycle'] == 1 and params['manualThreshold'] != 'None':
+                elif params['CellCycle'] == 1 and params['manualThreshold'] is not None:
                     nucleusfile = os.path.join(paramsexp['pathOut'], 'ManualThreshold', CellCycleStages[c],
                                                 paramsexp['date'] + "_{}_max_nucleus_mask_threshold.tif".format(fn))
             with imr(nucleusfile) as im:
@@ -910,84 +1136,73 @@ def calculate_TS(lfn, params, paramsexp):
                 if params['CellCycle'] == 0:
                     nucleusfile = get_tif(path + "_{}_max_nucleus_mask.tif".format(fn))
                     cellfile = get_tif(path + "_{}_max_cell_mask.tif".format(fn))
-                elif params['CellCycle'] == 1 and params['manualThreshold'] == 'None':
+                elif params['CellCycle'] == 1 and params['manualThreshold'] is None:
                     nucleusfile = os.path.join(paramsexp['pathOut'], CellCycleStages[c],
                                                 paramsexp['date'] + "_{}_max_nucleus_mask_threshold.tif".format(fn))
                     cellfile = os.path.join(paramsexp['pathOut'], CellCycleStages[c],
                                                 paramsexp['date'] + "_{}_max_cell_mask_threshold.tif".format(fn))
-                elif params['CellCycle'] == 1 and params['manualThreshold'] != 'None':
+                elif params['CellCycle'] == 1 and params['manualThreshold'] is not None:
                     nucleusfile = os.path.join(paramsexp['pathOut'], 'ManualThreshold', CellCycleStages[c],
                                                 paramsexp['date'] + "_{}_max_nucleus_mask_threshold.tif".format(fn))
                     cellfile = os.path.join(paramsexp['pathOut'], 'ManualThreshold', CellCycleStages[c],
                                                 paramsexp['date'] + "_{}_max_cell_mask_threshold.tif".format(fn))
 
                 ##### load data
-                data = np.loadtxt(locfile)
-                if params['localizeDim'] == "3D":
-                    data = data.reshape((-1, 9))[:, np.r_[:5, -1]]
-                if params['localizeDim'] == "2D":
-                    data = data.reshape((-1, 7))[:, np.r_[:5, -1]]
+                data = pandas.read_table(locfile)
                 with imr(nucleusfile, dtype=float) as imn, imr(cellfile, dtype=float) as imc:
                     nucleusarray = imn(0)
                     cellarray = imc(0)
 
                 # select for cell and nucleus spots
-                for row in data.reshape((-1, 6)):
-                    x = int(round(row[1]))
-                    y = int(round(row[2]))
+                for _, row in data.iterrows():
+                    x = int(round(row['x']))
+                    y = int(round(row['y']))
+                    Ixyzfit = row[['I', 'x', 'y', 'z', 'fit']].to_numpy(float)
                     nucnr = nucleusarray[y, x]
                     cellnr = cellarray[y, x]
                     if nucnr > 0 and nucnr != 32768 and nucnr != 65535.0:
                         ldCountNuc[fi][nucnr] += 1  ### add count to ldCountNuc
                         ldCountBoth[fi][nucnr] += 1  ### add count to ldCountBoth
-                        if row[-1] > 0:  ### check if fit was not forced
-                            dataNucleus.append(row[0])  ### add intensity to dataNucleus
+                        if row['fit'] > 0:  ### check if fit was not forced
+                            dataNucleus.append(row['I'])  ### add intensity to dataNucleus
                         if params['includeMultTS'] > 0:
-                            ldNucTS[fi][nucnr] = np.vstack((ldNucTS[fi][nucnr], row[0]))  ### add intensity nuclear spot
-                            ldNucTSPos[fi][nucnr] = np.vstack(
-                                (ldNucTSPos[fi][nucnr], row[[0, 1, 2, 3, 5]]))  ### add intensity and x,y location, fit
-                        if row[0] > ld[fi][nucnr]:
-                            ld[fi][nucnr] = row[0]  ### replace intensity in ld if spot has higher intensity
-                            ldPos[fi][nucnr] = row[[0, 1, 2, 3, 5]]  ### replace intensity and x,y location, fit
+                            ldNucTS[fi][nucnr] = np.vstack((ldNucTS[fi][nucnr], row['I']))
+                            ldNucTSPos[fi][nucnr] = np.vstack((ldNucTSPos[fi][nucnr], Ixyzfit))
+                        if row['I'] > ld[fi][nucnr]:
+                            ld[fi][nucnr] = row['I']  ### replace intensity in ld if spot has higher intensity
+                            ldPos[fi][nucnr] = Ixyzfit  ### replace intensity and x,y location, fit
                     elif cellnr > 0 and cellnr != 32768 and nucnr != 65535.0:  ### if spot is in cytoplasm but not in nucleus
                         ldCountCell[fi][cellnr] += 1  ### add count to ldCountCell
                         ldCountBoth[fi][cellnr] += 1  ### add count to ldCountBoth
-                        ldCytoPos[fi][cellnr] = np.vstack((ldCytoPos[fi][cellnr], row[
-                            [0, 1, 2, 3, 5]]))  ### add cyto spots to ldCytoPos, also if fit is 0
-                        if row[-1] > 0:  ### check if fit is not forced
-                            dataCell.append(row[0])  ### add intensity to dataCell
+                        ldCytoPos[fi][cellnr] = np.vstack((ldCytoPos[fi][cellnr], Ixyzfit))  ### add cyto spots to ldCytoPos, also if fit is 0
+                        if row['fit'] > 0:  ### check if fit is not forced
+                            dataCell.append(row['I'])  ### add intensity to dataCell
                         if params['MaskTS'] == "cell":
                             if params['includeMultTS'] > 0:
                                 ldNucTS[fi][cellnr] = np.vstack((ldNucTS[fi][cellnr], row[0]))  ### add intensity cell spot
-                                ldNucTSPos[fi][cellnr] = np.vstack((ldNucTSPos[fi][cellnr], row[
-                                    [0, 1, 2, 3, 5]]))  ### add intensity and x,y location, fit
-                            if row[0] > ld[fi][cellnr]:
-                                ld[fi][cellnr] = row[0]  ### replace intensity in ld if spot has higher intensit
-                                ldPos[fi][cellnr] = row[[0, 1, 2, 3, 5]]  ### replace intensity and x,y location
+                                ldNucTSPos[fi][cellnr] = np.vstack((ldNucTSPos[fi][cellnr], Ixyzfit))
+                            if row['I'] > ld[fi][cellnr]:
+                                ld[fi][cellnr] = row['I']  ### replace intensity in ld if spot has higher intensit
+                                ldPos[fi][cellnr] = Ixyzfit  ### replace intensity and x,y location
                     else:
                         continue
 
             ### warning, the unfiltered data includes spots that are not fit, and includes data for cells that have no RNAs. So this unfiltered data is not using the parameters params['ExclEmpty']. This unfiltered data is useful if you want to compare Cy3 and Cy5 data from the same cell, for example during the params['CalcSingleCellCorr']. If you want filtering, this occurs in the steps below, and the results will be saved as "_CountNuc+Cytoplasm_"+color+".txt" and "_intensity_brightest_txpnsite_"+color+".txt".
 
-            if params['CellCycle'] == 0:
-                paramsexp['outfilePart1'] = paramsexp['pathOut'] + paramsexp['date'] + "_" + paramsexp['expName']
-            elif params['CellCycle'] == 1 and params['manualThreshold'] == 'None':
-                paramsexp['outfilePart1'] = paramsexp['pathOut'] + CellCycleStages[c] + '/' + paramsexp['date'] + "_" + paramsexp['expName']
-            elif params['CellCycle'] == 1 and params['manualThreshold'] != 'None':
-                paramsexp['outfilePart1'] = paramsexp['pathOut'] + 'ManualThreshold/' + CellCycleStages[c] + paramsexp['date'] + "_" + paramsexp['expName']
-            
+            common_path = get_common_path_out(params, paramsexp, CellCycleStages, c)
+
             # save unfiltered data
             countUnfiltered = []
             for d in range(0, int(len(ldCountBoth))): countUnfiltered.extend(ldCountBoth[d].values())
 
             dataTxpnSiteUnfiltered = []
             for d in range(0, int(len(ld))): dataTxpnSiteUnfiltered.extend(ld[d].values())
-            np.savetxt(paramsexp['outfilePart1'] + "_CountNuc+Cytoplasm_" + color + "_nofilter.txt", countUnfiltered, fmt='%.8e', delimiter='\t')
-            np.savetxt(paramsexp['outfilePart1'] + "_intensity_brightest_txpnsite_" + color + "_nofilter.txt", dataTxpnSiteUnfiltered, fmt='%.8e', delimiter='\t')
+            np.savetxt(common_path + "_CountNuc+Cytoplasm_" + color + "_nofilter.txt", countUnfiltered, fmt='%.8e', delimiter='\t')
+            np.savetxt(common_path + "_intensity_brightest_txpnsite_" + color + "_nofilter.txt", dataTxpnSiteUnfiltered, fmt='%.8e', delimiter='\t')
 
             dataTxpnSiteUnfilteredPos = []
             for d in range(0, int(len(ldPos))): dataTxpnSiteUnfilteredPos.extend(ldPos[d].values())
-            np.savetxt(paramsexp['outfilePart1'] + "_intensity_brightest_txpnsite_xyfit_" + color + "_nofilter.txt", dataTxpnSiteUnfilteredPos, fmt='%.8e', delimiter='\t')
+            np.savetxt(common_path + "_intensity_brightest_txpnsite_xyfit_" + color + "_nofilter.txt", dataTxpnSiteUnfilteredPos, fmt='%.8e', delimiter='\t')
 
             ### filter spots
 
@@ -1067,9 +1282,9 @@ def calculate_TS(lfn, params, paramsexp):
                         except ZeroDivisionError: cytoDistMin.append(999999.)
 
             tableCyto = np.c_[cytoMean, cytoSD, cytoNr, cytoDist, cytoDistMin]  # mean, SD, nr spots, avg distance, avg min distance per cell) ### Note, this data is not filtered for fitted spots
-            np.savetxt(paramsexp['outfilePart1'] + "_cyto_table_info_mean+SD+nrspots+avgdist+avgmindist_per_cell_" + color + ".txt", tableCyto, fmt='%.8e', delimiter='\t')
+            np.savetxt(common_path + "_cyto_table_info_mean+SD+nrspots+avgdist+avgmindist_per_cell_" + color + ".txt", tableCyto, fmt='%.8e', delimiter='\t')
             tabledistAll = np.c_[distAll, spotAll, cytoNrAll]  # min distance per spot, intensity spot
-            np.savetxt(paramsexp['outfilePart1'] + "_cyto_table_info_mindist+intensity+nrspotsincell_per_spot_" + color + ".txt", tabledistAll, fmt='%.8e', delimiter='\t')
+            np.savetxt(common_path + "_cyto_table_info_mindist+intensity+nrspotsincell_per_spot_" + color + ".txt", tabledistAll, fmt='%.8e', delimiter='\t')
 
             #### define normalizing spots
             normSpots = []
@@ -1115,7 +1330,7 @@ def calculate_TS(lfn, params, paramsexp):
             plt.xlabel('Cytoplasmic spot intensity')
             plt.ylabel('Frequency')
             plt.xlim([0, 8 * dataCellMedian])
-            plt.savefig(paramsexp['outfilePart1'] + "_cyto_intensity_distribution_" + color + ".pdf", format='pdf')
+            plt.savefig(common_path + "_cyto_intensity_distribution_" + color + ".pdf", format='pdf')
             plt.close(fig)
 
             if params['useFit'] == 0:
@@ -1123,7 +1338,7 @@ def calculate_TS(lfn, params, paramsexp):
             else:
                 normCyt = normvalue
 
-            np.savetxt(paramsexp['outfilePart1'] + "_cyto_normalization_value_" + color + ".txt", np.array([normCyt]), fmt='%.8e',
+            np.savetxt(common_path + "_cyto_normalization_value_" + color + ".txt", np.array([normCyt]), fmt='%.8e',
                     delimiter='\t')
 
             ### normalize Txpn site
@@ -1146,13 +1361,13 @@ def calculate_TS(lfn, params, paramsexp):
                     normCyt = float(params['NormValueCy5'])
                 dataTxpnSiteNormValue = [x / normCyt for x in dataTxpnSite]
                 dataTxpnSiteNormValueUnfiltered = [x / normCyt for x in dataTxpnSiteUnfiltered]
-                np.savetxt(paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_NormValue" + color + ".txt",
+                np.savetxt(common_path + "_normalized_intensity_brightest_txpnsite_NormValue" + color + ".txt",
                         dataTxpnSiteNormValue, fmt='%.8e', delimiter='\t')
-                np.save(paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_NormValue" + color + ".npy",
+                np.save(common_path + "_normalized_intensity_brightest_txpnsite_NormValue" + color + ".npy",
                      dataTxpnSiteNormValue)
-                np.savetxt(paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_NormValue" + color + "_nofilter.txt",
+                np.savetxt(common_path + "_normalized_intensity_brightest_txpnsite_NormValue" + color + "_nofilter.txt",
                         dataTxpnSiteNormValueUnfiltered, fmt='%.8e', delimiter='\t')
-                np.save(paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_NormValue" + color + "_nofilter.npy",
+                np.save(common_path + "_normalized_intensity_brightest_txpnsite_NormValue" + color + "_nofilter.npy",
                      dataTxpnSiteNormValueUnfiltered)
 
             ### filter and define TS for multiple TSs
@@ -1195,15 +1410,15 @@ def calculate_TS(lfn, params, paramsexp):
                                 ldNucTSPos[fn][nuc] = ldNucTSPos[fn][nuc].reshape(-1, 5)[toKeep]
                                 countTS.append(nrTS)
                 dataTxpnSiteMultNorm = dataTxpnSiteMult / normCyt
-        
+
             # To normalize transcription sites with a user-defined value
             if params['useNormValue'] == 1 and params['includeMultTS'] > 0:
                 if channel == 0: normCyt = float(params['NormValueCy3'])
                 elif channel == 1: normCyt = float(params['NormValueCy5'])
                 dataTxpnSiteMultNormValue = [x / normCyt for x in dataTxpnSiteMult]
-                np.savetxt(paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_Mult_NormValue" + color + ".txt",
+                np.savetxt(common_path + "_normalized_intensity_brightest_txpnsite_Mult_NormValue" + color + ".txt",
                            dataTxpnSiteMultNormValue, fmt='%.8e', delimiter='\t')
-                np.save(paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_Mult_NormValue" + color + ".npy",
+                np.save(common_path + "_normalized_intensity_brightest_txpnsite_Mult_NormValue" + color + ".npy",
                            dataTxpnSiteMultNormValue)
 
             ### convert dictionaries to np.arrays/lists
@@ -1221,42 +1436,42 @@ def calculate_TS(lfn, params, paramsexp):
             countBoth = [t for t in countBoth if t != []]
 
             #### save results intensity spots/txpnsite, this is the filtered data. The count distribution are not filtered on whether there is a fit.
-            np.savetxt(paramsexp['outfilePart1'] + "_intensity_nuclear_spots_" + color + ".txt", dataNucleus, fmt='%.8e',
+            np.savetxt(common_path + "_intensity_nuclear_spots_" + color + ".txt", dataNucleus, fmt='%.8e',
                     delimiter='\t')
-            np.savetxt(paramsexp['outfilePart1'] + "_normalized_intensity_nuclear_spots_" + color + ".txt", dataNuclNorm, fmt='%.8e',
+            np.savetxt(common_path + "_normalized_intensity_nuclear_spots_" + color + ".txt", dataNuclNorm, fmt='%.8e',
                     delimiter='\t')
-            np.savetxt(paramsexp['outfilePart1'] + "_intensity_cytoplasmic_spots_" + color + ".txt", dataCell, fmt='%.8e',
+            np.savetxt(common_path + "_intensity_cytoplasmic_spots_" + color + ".txt", dataCell, fmt='%.8e',
                     delimiter='\t')
-            np.savetxt(paramsexp['outfilePart1'] + "_intensity_brightest_txpnsite_" + color + ".txt", dataTxpnSite, fmt='%.8e',
+            np.savetxt(common_path + "_intensity_brightest_txpnsite_" + color + ".txt", dataTxpnSite, fmt='%.8e',
                     delimiter='\t')
-            np.savetxt(paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_" + color + ".txt", dataTxpnSiteNorm,
+            np.savetxt(common_path + "_normalized_intensity_brightest_txpnsite_" + color + ".txt", dataTxpnSiteNorm,
                     fmt='%.8e', delimiter='\t')
-            np.savetxt(paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_" + color + "_nofilter.txt",
+            np.savetxt(common_path + "_normalized_intensity_brightest_txpnsite_" + color + "_nofilter.txt",
                     dataTxpnSiteNormUnfiltered, fmt='%.8e', delimiter='\t')
             if params['includeMultTS'] > 0:
-                np.savetxt(paramsexp['outfilePart1'] + "_intensity_txpnsite_" + color + "_mult_method" + str(params['includeMultTS']) + ".txt",
+                np.savetxt(common_path + "_intensity_txpnsite_" + color + "_mult_method" + str(params['includeMultTS']) + ".txt",
                         dataTxpnSiteMult, fmt='%.8e', delimiter='\t')
-                np.savetxt(paramsexp['outfilePart1'] + "_normalized_intensity_txpnsite_" + color + "_mult_method" + str(
+                np.savetxt(common_path + "_normalized_intensity_txpnsite_" + color + "_mult_method" + str(
                     params['includeMultTS']) + ".txt", dataTxpnSiteMultNorm, fmt='%.8e', delimiter='\t')
-                np.save(paramsexp['outfilePart1'] + "_normalized_intensity_txpnsite_" + color + "_mult_method" + str(
+                np.save(common_path + "_normalized_intensity_txpnsite_" + color + "_mult_method" + str(
                     params['includeMultTS']) + ".npy", dataTxpnSiteMultNorm)
                 if params['includeMultTS'] == 1:
-                    np.savetxt(paramsexp['outfilePart1'] + "_count_nrTS" + color + "_threshold_" + str(params['thresholdTS']) + ".txt", countTS,
+                    np.savetxt(common_path + "_count_nrTS" + color + "_threshold_" + str(params['thresholdTS']) + ".txt", countTS,
                             fmt='%.8e', delimiter='\t')
-                    np.save(paramsexp['outfilePart1'] + "_count_nrTS" + color + "_threshold_" + str(params['thresholdTS']) + ".npy", countTS)
+                    np.save(common_path + "_count_nrTS" + color + "_threshold_" + str(params['thresholdTS']) + ".npy", countTS)
 
-            np.save(paramsexp['outfilePart1'] + "_CountNuc_" + color + ".npy", countNucleus)
-            np.save(paramsexp['outfilePart1'] + "_CountCytoplasm_" + color + ".npy", countCell)
-            np.save(paramsexp['outfilePart1'] + "_CountNuc+Cytoplasm_" + color + ".npy", countBoth)
-            np.save(paramsexp['outfilePart1'] + "_normalized_intensity_txpnsite_" + color + ".npy", dataTxpnSiteNorm)
+            np.save(common_path + "_CountNuc_" + color + ".npy", countNucleus)
+            np.save(common_path + "_CountCytoplasm_" + color + ".npy", countCell)
+            np.save(common_path + "_CountNuc+Cytoplasm_" + color + ".npy", countBoth)
+            np.save(common_path + "_normalized_intensity_txpnsite_" + color + ".npy", dataTxpnSiteNorm)
 
             ### calculate mask TS
             if params['CellCycle'] == 0:
                 nucleusfile = get_tif(path + "_{}_max_nucleus_mask.tif".format(lfn[-1]))
-            elif params['CellCycle'] == 1 and params['manualThreshold'] == 'None':
+            elif params['CellCycle'] == 1 and params['manualThreshold'] is None:
                 nucleusfile = os.path.join(paramsexp['pathOut'], CellCycleStages[c],
                                            paramsexp['date'] + "_{}_max_nucleus_mask_threshold.tif".format(lfn[-1]))
-            elif params['CellCycle'] == 1 and params['manualThreshold'] != 'None':
+            elif params['CellCycle'] == 1 and params['manualThreshold'] is not None:
                 nucleusfile = os.path.join(paramsexp['pathOut'], 'ManualThreshold', CellCycleStages[c],
                                            paramsexp['date'] + "_{}_max_nucleus_mask_threshold.tif".format(lfn[-1]))
             with imr(nucleusfile) as im:
@@ -1313,7 +1528,7 @@ def calculate_TS(lfn, params, paramsexp):
                 if 1 in params['channelsToAnalyze']:
                     maskImNew.append(np.int16(imageTSCy5[i]))
 
-                tiffwrite(path + "_{}_TS.tif".format(fn), np.asarray(maskImNew))
+                tiffwrite(path + "_{}_TS.tif".format(fn), np.asarray(maskImNew), pxsize=im.pxsize, deltaz=im.deltaz)
 
 
 ############################################################################################################
@@ -1322,20 +1537,14 @@ def calculate_TS(lfn, params, paramsexp):
 
 def make_TS_count_histograms(lfn, params, paramsexp):
     print("Making histograms")
-    
+
     CellCycleStages = params['CellCycleStages']
     if params['CellCycle'] == 0: Z = 1
-    elif params['CellCycle'] == 1 and params['manualThreshold'] == 'None': Z = len(CellCycleStages)
-    elif params['CellCycle'] == 1 and params['manualThreshold'] != 'None': Z = 1
-    
-    for c in range(Z):
-        if params['CellCycle'] == 0:
-            paramsexp['outfilePart1'] = paramsexp['pathOut'] + paramsexp['date'] + "_" + paramsexp['expName']
-        elif params['CellCycle'] == 1 and params['manualThreshold'] == 'None':
-            paramsexp['outfilePart1'] = paramsexp['pathOut'] + CellCycleStages[c] + '/' + paramsexp['date'] + "_" + paramsexp['expName']
-        elif params['CellCycle'] == 1 and params['manualThreshold'] != 'None':
-            paramsexp['outfilePart1'] = paramsexp['pathOut'] + 'ManualThreshold/' + CellCycleStages[c] + paramsexp['date'] + "_" + paramsexp['expName']
+    elif params['CellCycle'] == 1 and params['manualThreshold'] is None: Z = len(CellCycleStages)
+    elif params['CellCycle'] == 1 and params['manualThreshold'] is not None: Z = 1
 
+    for c in range(Z):
+        common_path = get_common_path_out(params, paramsexp, CellCycleStages, c)
         for channel in params['channelsToAnalyze']:
 
             if channel == 0: color = "cy3"
@@ -1344,23 +1553,23 @@ def make_TS_count_histograms(lfn, params, paramsexp):
             ### load data
             if params['includeMultTS'] == 0:
                 try:
-                    dataTS = np.load(paramsexp['outfilePart1'] + "_normalized_intensity_txpnsite_" + color + ".npy")
+                    dataTS = np.load(common_path + "_normalized_intensity_txpnsite_" + color + ".npy")
                     method = "1 TS per cell"
                 except Exception:
                     print("Error: No TS data found. Please run CalculateTranscriptionSites first with the same parameters")
                     continue
             elif params['includeMultTS'] == 1:
                 try:
-                    dataTS = np.load(paramsexp['outfilePart1'] + "_normalized_intensity_txpnsite_" + color + "_mult_method" + str(
+                    dataTS = np.load(common_path + "_normalized_intensity_txpnsite_" + color + "_mult_method" + str(
                     params['includeMultTS']) + ".npy")
                     method = "TS threshold " + str(params['thresholdTS'])
-                    countTS = np.load(paramsexp['outfilePart1'] + "_count_nrTS" + color + "_threshold_" + str(params['thresholdTS']) + ".npy")
+                    countTS = np.load(common_path + "_count_nrTS" + color + "_threshold_" + str(params['thresholdTS']) + ".npy")
                 except Exception:
                     print("Error: No TS data found. Please run CalculateTranscriptionSites first with the same parameters")
                     continue
             elif params['includeMultTS'] == 2:
                 try:
-                    dataTS = np.load(paramsexp['outfilePart1'] + "_normalized_intensity_txpnsite_" + color + "_mult_method" + str(
+                    dataTS = np.load(common_path + "_normalized_intensity_txpnsite_" + color + "_mult_method" + str(
                         params['includeMultTS']) + ".npy")
                     method = str(params['nrTS2Include']) + " TSs per cell"
                 except Exception:
@@ -1385,7 +1594,7 @@ def make_TS_count_histograms(lfn, params, paramsexp):
             hNorm = histTSvals(dataTxpnSiteNormNonZero, bins, params['exclBins'])
             bins = bins[:-1]
             if params['CalcFracOff'] == 1 and params['exclBins'] == 0 and params['exclBinsCount'] == 0 and params['ExclEmpty'] == 1: np.savetxt(
-                paramsexp['outfilePart1'] + "_fraction_off_" + color + ".txt", [hNorm[0]], delimiter='\t')
+                common_path + "_fraction_off_" + color + ".txt", [hNorm[0]], delimiter='\t')
 
             dataTSnonZero = []
             for i in range(0, len(dataTS)):
@@ -1408,7 +1617,7 @@ def make_TS_count_histograms(lfn, params, paramsexp):
             #### plot figure TS intensity distribution (and TS count)
             histTS(dataTSnonZero, hNorm[params['exclBins']:], bins[params['exclBins']:], Pres, n, aT, PPoissres, cT,
                    freqAxisTS, xCenterTS, color, params,
-                   paramsexp['outfilePart1'] + "_txpnsite_histogram_" + color + "_method=" + method.replace(" ", "_") + ".pdf")
+                   common_path + "_txpnsite_histogram_" + color + "_method=" + method.replace(" ", "_") + ".pdf")
 
             ### plot nr of TS per nucleus
             if params['includeMultTS'] == 1:
@@ -1429,7 +1638,7 @@ def make_TS_count_histograms(lfn, params, paramsexp):
                              (np.std(countTS) / np.sqrt(len(countTS))))) + "\nNumber of cells analyzed = " + str(
                              len(countTS)) + "\nThreshold TS = " + str(params['thresholdTS']), fontsize=12,
                          horizontalalignment='center', verticalalignment='top')
-                plt.savefig(paramsexp['outfilePart1'] + "_TS_count_" + color + "_threshold=" + str(params['thresholdTS']) + ".pdf",
+                plt.savefig(common_path + "_TS_count_" + color + "_threshold=" + str(params['thresholdTS']) + ".pdf",
                             format='pdf')
                 plt.close(fig)
 
@@ -1437,9 +1646,9 @@ def make_TS_count_histograms(lfn, params, paramsexp):
 
             ### counting spots
 
-            countNucleus = np.load(paramsexp['outfilePart1'] + "_CountNuc_" + color + ".npy")
-            countCell = np.load(paramsexp['outfilePart1'] + "_CountCytoplasm_" + color + ".npy")
-            countBoth = np.load(paramsexp['outfilePart1'] + "_CountNuc+Cytoplasm_" + color + ".npy")
+            countNucleus = np.load(common_path + "_CountNuc_" + color + ".npy")
+            countCell = np.load(common_path + "_CountCytoplasm_" + color + ".npy")
+            countBoth = np.load(common_path + "_CountNuc+Cytoplasm_" + color + ".npy")
 
             if channel == 0:
                 if max(countNucleus) > params['nrbins_cy3']: print("Warning! Cy3 Nuclear spots - fewer bins than max value")
@@ -1469,21 +1678,21 @@ def make_TS_count_histograms(lfn, params, paramsexp):
                 NucldistrCy5.append(countNucleusNonZero)
 
             histNuc(countNucleusNonZero, bins, freqAxisNuc, xCenter, params['exclBinsCount'], color,
-                    paramsexp['outfilePart1'] + "_nuclear_count_" + color + ".pdf")
+                    common_path + "_nuclear_count_" + color + ".pdf")
             histCell(countBothNonZero, bins, freqAxisCell, xCenter, params['exclBinsCount'], color,
-                     paramsexp['outfilePart1'] + "_cell_count_" + color + ".pdf")
+                     common_path + "_cell_count_" + color + ".pdf")
 
-            np.savetxt(paramsexp['outfilePart1'] + "_cellular_count_" + color + ".txt", countBoth, fmt='%i', delimiter='\t')
-            np.savetxt(paramsexp['outfilePart1'] + "_nuclear_count_" + color + ".txt", countNucleus, fmt='%i', delimiter='\t')
+            np.savetxt(common_path + "_cellular_count_" + color + ".txt", countBoth, fmt='%i', delimiter='\t')
+            np.savetxt(common_path + "_nuclear_count_" + color + ".txt", countNucleus, fmt='%i', delimiter='\t')
 
-            writestatsfile(paramsexp['outfilePart1'], color, countBothNonZero, countNucleusNonZero, dataTSnonZero,
+            writestatsfile(common_path, color, countBothNonZero, countNucleusNonZero, dataTSnonZero,
                            params)
 
             if params['useNormValue'] == 1 and params['includeMultTS'] == 0:
                     TSNormValuedistrCy3 = []
                     TSNormValuedistrCy5 = []
                     dataTSNormValue = np.load(
-                        paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_NormValue" + color + ".npy")
+                        common_path + "_normalized_intensity_brightest_txpnsite_NormValue" + color + ".npy")
                     method = "define NormValue"
                     dataTxpnSiteNormValueNonZero = [i for i in dataTSNormValue if
                                                     i > (params['exclBins'] - 0.5)]  # remove TS data of excluded bins
@@ -1506,12 +1715,12 @@ def make_TS_count_histograms(lfn, params, paramsexp):
                     if channel == 1: TSNormValuedistrCy5.append(dataTSNormValuenonZero)
                     histTS(dataTSNormValuenonZero, hNorm[params['exclBins']:], bins[params['exclBins']:], Pres, n, aT,
                            PPoissres, cT, freqAxisTS, xCenterTS, color, params,
-                           paramsexp['outfilePart1'] + "_txpnsite_histogram" + color + "_method=" + method.replace(" ", "_") + ".pdf")
-                        
+                           common_path + "_txpnsite_histogram" + color + "_method=" + method.replace(" ", "_") + ".pdf")
+
             if params['useNormValue'] == 1 and params['includeMultTS'] > 0:
                     MultTSNormValuedistrCy3 = []
                     MultTSNormValuedistrCy5 = []
-                    dataTSMultNormValue = np.load(paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_Mult_NormValue" + color + ".npy")
+                    dataTSMultNormValue = np.load(common_path + "_normalized_intensity_brightest_txpnsite_Mult_NormValue" + color + ".npy")
                     method = "define NormValue"
                     dataTxpnSiteMultNormValueNonZero = [i for i in dataTSMultNormValue if i > (params['exclBins'] - 0.5)]  # remove TS data of excluded bins
                     if channel == 0:
@@ -1531,8 +1740,8 @@ def make_TS_count_histograms(lfn, params, paramsexp):
                     if channel == 1: MultTSNormValuedistrCy5.append(dataTSMultNormValuenonZero)
                     histTS(dataTSMultNormValuenonZero, hNorm[params['exclBins']:], bins[params['exclBins']:], Pres, n, aT,
                          PPoissres, cT, freqAxisTS, xCenterTS, color, params,
-                         paramsexp['outfilePart1'] + "_txpnsite_histogram" + color + "_method=" + method.replace(" ", "_") + ".pdf")
-                
+                         common_path + "_txpnsite_histogram" + color + "_method=" + method.replace(" ", "_") + ".pdf")
+
     return (CelldistrCy3, NucldistrCy3, TSdistrCy3, CelldistrCy5, NucldistrCy5, TSdistrCy5)
 
 
@@ -1543,26 +1752,21 @@ def make_TS_count_histograms(lfn, params, paramsexp):
 def calculate_singlecell_corr(lfn, params, paramsexp):
     print("Calculating correlation")
     cors = []
-    
+
     CellCycleStages = params['CellCycleStages']
     if params['CellCycle'] == 0: Z = 1
-    elif params['CellCycle'] == 1 and params['manualThreshold'] == 'None': Z = len(CellCycleStages)
-    elif params['CellCycle'] == 1 and params['manualThreshold'] != 'None': Z = 1
-    
+    elif params['CellCycle'] == 1 and params['manualThreshold'] is None: Z = len(CellCycleStages)
+    elif params['CellCycle'] == 1 and params['manualThreshold'] is not None: Z = 1
+
     for c in range(Z):
-        if params['CellCycle'] == 0:
-            paramsexp['outfilePart1'] = paramsexp['pathOut'] + paramsexp['date'] + "_" + paramsexp['expName']
-        elif params['CellCycle'] == 1 and params['manualThreshold'] == 'None':
-            paramsexp['outfilePart1'] = paramsexp['pathOut'] + CellCycleStages[c] + '/' + paramsexp['date'] + "_" + paramsexp['expName']
-        elif params['CellCycle'] == 1 and params['manualThreshold'] != 'None':
-            paramsexp['outfilePart1'] = paramsexp['pathOut'] + 'ManualThreshold/' + CellCycleStages[c] + paramsexp['date'] + "_" + paramsexp['expName']
+        common_path = get_common_path_out(params, paramsexp, CellCycleStages, c)
 
         ### Scatter plot between nr of nascent RNA and RNA count Cy3
         if 0 in params['channelsToAnalyze']:
-            CountCy3 = np.loadtxt(paramsexp['outfilePart1'] + "_CountNuc+Cytoplasm_cy3_nofilter.txt")
-            TSCy3 = np.loadtxt(paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_cy3_nofilter.txt")
-            if params['useNormValue'] == 1: TSCy3_NormValue = np.loadtxt(paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_NormValuecy3_nofilter.txt")
-            TSCy3Pos = np.loadtxt(paramsexp['outfilePart1'] + "_intensity_brightest_txpnsite_xyfit_cy3_nofilter.txt")
+            CountCy3 = np.loadtxt(common_path + "_CountNuc+Cytoplasm_cy3_nofilter.txt")
+            TSCy3 = np.loadtxt(common_path + "_normalized_intensity_brightest_txpnsite_cy3_nofilter.txt")
+            if params['useNormValue'] == 1: TSCy3_NormValue = np.loadtxt(common_path + "_normalized_intensity_brightest_txpnsite_NormValuecy3_nofilter.txt")
+            TSCy3Pos = np.loadtxt(common_path + "_intensity_brightest_txpnsite_xyfit_cy3_nofilter.txt")
             if params['ExclEmpty'] == 1:
                 EmptyCy3 = list(np.where(CountCy3 == 0)[0])  # filter on cells that are empty
             else:
@@ -1576,7 +1780,7 @@ def calculate_singlecell_corr(lfn, params, paramsexp):
             plt.title("Cy3, correlation = " + str('{0:.3f}'.format(corTScountCy3[0])))
             plt.xlabel('Nr RNA/cell, Cy3')
             plt.ylabel('Nr of nascent RNA at TS')
-            plt.savefig(paramsexp['outfilePart1'] + "_correlation_count_with_TSintensity_cy3.pdf", format='pdf')
+            plt.savefig(common_path + "_correlation_count_with_TSintensity_cy3.pdf", format='pdf')
             plt.close(fig)
             cors.append(
                 "Correlation Cy3 TS intensity and cell count = " + str(corTScountCy3[0]) + " , p-value = " + str(
@@ -1588,10 +1792,10 @@ def calculate_singlecell_corr(lfn, params, paramsexp):
 
         ### Scatter plot between nr of nascent RNA and RNA count Cy5
         if 1 in params['channelsToAnalyze']:
-            CountCy5 = np.loadtxt(paramsexp['outfilePart1'] + "_CountNuc+Cytoplasm_cy5_nofilter.txt")
-            TSCy5 = np.loadtxt(paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_cy5_nofilter.txt")
-            if params['useNormValue'] == 1: TSCy5_NormValue = np.loadtxt(paramsexp['outfilePart1'] + "_normalized_intensity_brightest_txpnsite_NormValuecy5_nofilter.txt")
-            TSCy5Pos = np.loadtxt(paramsexp['outfilePart1'] + "_intensity_brightest_txpnsite_xyfit_cy5_nofilter.txt")
+            CountCy5 = np.loadtxt(common_path + "_CountNuc+Cytoplasm_cy5_nofilter.txt")
+            TSCy5 = np.loadtxt(common_path + "_normalized_intensity_brightest_txpnsite_cy5_nofilter.txt")
+            if params['useNormValue'] == 1: TSCy5_NormValue = np.loadtxt(common_path + "_normalized_intensity_brightest_txpnsite_NormValuecy5_nofilter.txt")
+            TSCy5Pos = np.loadtxt(common_path + "_intensity_brightest_txpnsite_xyfit_cy5_nofilter.txt")
             if params['ExclEmpty'] == 1:
                 EmptyCy5 = list(np.where(CountCy5 == 0)[0])  # filter on cells that are empty
             else:
@@ -1606,7 +1810,7 @@ def calculate_singlecell_corr(lfn, params, paramsexp):
             plt.title("Cy5, correlation = " + str('{0:.3f}'.format(corTScountCy5[0])))
             plt.xlabel('Nr RNA/cell, Cy5')
             plt.ylabel('Nr of nascent RNA at TS')
-            plt.savefig(paramsexp['outfilePart1'] + "_correlation_count_with_TSintensity_cy5.pdf", format='pdf')
+            plt.savefig(common_path + "_correlation_count_with_TSintensity_cy5.pdf", format='pdf')
             plt.close(fig)
             cors.append(
                 "\nCorrelation Cy5 TS intensity and cell count = " + str(corTScountCy5[0]) + " , p-value = " + str(
@@ -1631,11 +1835,12 @@ def calculate_singlecell_corr(lfn, params, paramsexp):
             #           overlapNotEmpty = [x for x in range(0,len(CountCy3)) if x not in NoFit_EmptyCy3Cy5]
 
             ### calculate and plot distances
-            if params['localizeDim'] == "2D": dist = ((TSCy3Pos[:, 1] - TSCy5Pos[:, 1]) ** 2 + (
-                        TSCy3Pos[:, 2] - TSCy5Pos[:, 2]) ** 2) ** 0.5
-            if params['localizeDim'] == "3D": dist = ((TSCy3Pos[:, 1] - TSCy5Pos[:, 1]) ** 2 + (
-                        TSCy3Pos[:, 2] - TSCy5Pos[:, 2]) ** 2 + (TSCy3Pos[:, 3] - TSCy5Pos[:, 3]) ** 2) ** 0.5
-            np.savetxt(paramsexp['outfilePart1'] + "_distances_TSs.txt", dist, delimiter="\n", fmt='%.8e')
+            if params['localize']['dimension'] == 2:
+                dist = ((TSCy3Pos[:, 1] - TSCy5Pos[:, 1]) ** 2 + (TSCy3Pos[:, 2] - TSCy5Pos[:, 2]) ** 2) ** 0.5
+            else:
+                dist = ((TSCy3Pos[:, 1] - TSCy5Pos[:, 1]) ** 2 + (TSCy3Pos[:, 2] - TSCy5Pos[:, 2]) ** 2 +
+                        (TSCy3Pos[:, 3] - TSCy5Pos[:, 3]) ** 2) ** 0.5
+            np.savetxt(common_path + "_distances_TSs.txt", dist, delimiter="\n", fmt='%.8e')
 
             fig = plt.figure(figsize=(8, 3))
             h, x = np.histogram(np.sqrt(dist), bins=np.r_[0:20:.2])
@@ -1644,7 +1849,7 @@ def calculate_singlecell_corr(lfn, params, paramsexp):
             plt.title("Distances between Cy3 and Cy5 TS")
             plt.plot(x[:-1], h + 1)
             plt.tight_layout()
-            plt.savefig(paramsexp['outfilePart1'] + "_distances_TS.pdf", format='pdf')
+            plt.savefig(common_path + "_distances_TS.pdf", format='pdf')
             plt.close(fig)
 
             ### filter on distance
@@ -1666,8 +1871,8 @@ def calculate_singlecell_corr(lfn, params, paramsexp):
                             [float(fracCy3OnlyOff) / float(len(toAnalyze)),
                              float(fracCy5OnlyOff) / float(len(toAnalyze)), float(fracBothOff) / float(len(toAnalyze)),
                              float(fracBothOn) / float(len(toAnalyze))]]
-            np.savetxt(paramsexp['outfilePart1'] + "_fraction_on_off.txt", fractionList, delimiter="\t", fmt="%s")
-            
+            np.savetxt(common_path + "_fraction_on_off.txt", fractionList, delimiter="\t", fmt="%s")
+
             if params['useNormValue'] == 1:
                 fracCy3OnlyOff = sum((TSCy3_NormValue[toAnalyze] < params['onoffThreshCy3']) & (TSCy5_NormValue[toAnalyze] >= params['onoffThreshCy5']))
                 fracCy5OnlyOff = sum((TSCy3_NormValue[toAnalyze] >= params['onoffThreshCy3']) & (TSCy5_NormValue[toAnalyze] < params['onoffThreshCy5']))
@@ -1678,16 +1883,16 @@ def calculate_singlecell_corr(lfn, params, paramsexp):
                                 [float(fracCy3OnlyOff) / float(len(toAnalyze)),
                                  float(fracCy5OnlyOff) / float(len(toAnalyze)), float(fracBothOff) / float(len(toAnalyze)),
                                  float(fracBothOn) / float(len(toAnalyze))]]
-                np.savetxt(paramsexp['outfilePart1'] + "_fraction_on_off_NormValue.txt", fractionList, delimiter="\t", fmt="%s")
-                                         
-                                         
+                np.savetxt(common_path + "_fraction_on_off_NormValue.txt", fractionList, delimiter="\t", fmt="%s")
+
+
             overlap = [value for value in np.where(TSCy3 >= params['onoffThreshCy3'])[0].tolist() if
                        value in set(np.where(TSCy5 >= params['onoffThreshCy5'])[0].tolist())]
             overlap2 = [x for x in overlap if x not in toFilter]
 
-            corTSCy3Cy5 = pearsonr(TSCy3[toAnalyze], TSCy5[toAnalyze])
-            corTSCy3Cy5bg = pearsonr(TSCy3[overlap2], TSCy5[overlap2])
-            corCountCy3Cy5 = pearsonr(CountCy3[toAnalyze], CountCy5[toAnalyze])
+            corTSCy3Cy5 = pearsonr(TSCy3[toAnalyze], TSCy5[toAnalyze]) if toAnalyze else (np.nan, np.nan)
+            corTSCy3Cy5bg = pearsonr(TSCy3[overlap2], TSCy5[overlap2]) if overlap2 else (np.nan, np.nan)
+            corCountCy3Cy5 = pearsonr(CountCy3[toAnalyze], CountCy5[toAnalyze]) if toAnalyze else (np.nan, np.nan)
             if params['useNormValue'] == 1:
                 corTSCy3Cy5NormValue = pearsonr(TSCy3_NormValue[toAnalyze], TSCy5_NormValue[toAnalyze])
 
@@ -1697,7 +1902,7 @@ def calculate_singlecell_corr(lfn, params, paramsexp):
                 '{:.2E}'.format(corCountCy3Cy5[1])))
             plt.xlabel('Nr RNA/cell Cy3')
             plt.ylabel('Nr RNA/cell Cy5')
-            plt.savefig(paramsexp['outfilePart1'] + "_correlation_Count_Nuc+Cytoplasm.pdf", format='pdf')
+            plt.savefig(common_path + "_correlation_Count_Nuc+Cytoplasm.pdf", format='pdf')
             plt.close(fig)
 
             fig = plt.figure()
@@ -1708,7 +1913,7 @@ def calculate_singlecell_corr(lfn, params, paramsexp):
             plt.ylabel('Nr of nascent RNA at TS, Cy5')
             plt.xlim(0, params['x_lim'])
             plt.ylim(0, params['y_lim'])
-            plt.savefig(paramsexp['outfilePart1'] + "_correlation_TSintensity.pdf", format='pdf')
+            plt.savefig(common_path + "_correlation_TSintensity.pdf", format='pdf')
             plt.close(fig)
 
             fig = plt.figure()
@@ -1719,9 +1924,9 @@ def calculate_singlecell_corr(lfn, params, paramsexp):
             plt.ylabel('Nr of nascent RNA at TS, Cy5')
             plt.xlim(0, params['x_lim'])
             plt.ylim(0, params['y_lim'])
-            plt.savefig(paramsexp['outfilePart1'] + "_correlation_TSintensity_abovethreshold.pdf", format='pdf')
+            plt.savefig(common_path + "_correlation_TSintensity_abovethreshold.pdf", format='pdf')
             plt.close(fig)
-            
+
             if params['useNormValue'] == 1:
                 fig = plt.figure()
                 plt.scatter(TSCy3_NormValue[toAnalyze], TSCy5_NormValue[toAnalyze], s=2)
@@ -1731,10 +1936,10 @@ def calculate_singlecell_corr(lfn, params, paramsexp):
                 plt.ylabel('Nr of nascent RNA at TS, Cy5')
                 plt.xlim(0, params['x_lim'])
                 plt.ylim(0, params['y_lim'])
-                plt.savefig(paramsexp['outfilePart1'] + "_correlation_TSintensity_NormValue.pdf", format='pdf')
+                plt.savefig(common_path + "_correlation_TSintensity_NormValue.pdf", format='pdf')
                 plt.close(fig)
-                np.savetxt(paramsexp['outfilePart1'] + "_correlation_TSCy3_NormValue.txt", TSCy3_NormValue[toAnalyze], delimiter="\n", fmt="%s")
-                np.savetxt(paramsexp['outfilePart1'] + "_correlation_TSCy5_NormValue.txt", TSCy5_NormValue[toAnalyze], delimiter="\n", fmt="%s")
+                np.savetxt(common_path + "_correlation_TSCy3_NormValue.txt", TSCy3_NormValue[toAnalyze], delimiter="\n", fmt="%s")
+                np.savetxt(common_path + "_correlation_TSCy5_NormValue.txt", TSCy5_NormValue[toAnalyze], delimiter="\n", fmt="%s")
 
             cors.append("\nCorrelation Cy3-Cy5 TS intensity = " + str(corTSCy3Cy5[0]) + " , p-value = " + str(
                 '{:.2E}'.format(corTSCy3Cy5[1])))
@@ -1750,8 +1955,8 @@ def calculate_singlecell_corr(lfn, params, paramsexp):
 
             TSCy3 = TSCy3[toAnalyze]
             TSCy5 = TSCy5[toAnalyze]
-            np.savetxt(paramsexp['outfilePart1'] + "_correlation_TSCy3.txt", TSCy3, delimiter="\n", fmt="%s")
-            np.savetxt(paramsexp['outfilePart1'] + "_correlation_TSCy5.txt", TSCy5, delimiter="\n", fmt="%s")
+            np.savetxt(common_path + "_correlation_TSCy3.txt", TSCy3, delimiter="\n", fmt="%s")
+            np.savetxt(common_path + "_correlation_TSCy5.txt", TSCy5, delimiter="\n", fmt="%s")
             threshCy3 = range(0, int(max(TSCy3)))
             threshCy5 = range(0, int(max(TSCy5)))
             corMatrixL = np.zeros((len(threshCy3), len(threshCy5)))
@@ -1791,9 +1996,9 @@ def calculate_singlecell_corr(lfn, params, paramsexp):
             plt.colorbar(im2, cax=cax)
 
             #            fig.tight_layout()
-            plt.savefig(paramsexp['outfilePart1'] + "_correlation_TS_intensity_heatmaps_threshold.pdf", format='pdf')
+            plt.savefig(common_path + "_correlation_TS_intensity_heatmaps_threshold.pdf", format='pdf')
 
-            np.savetxt(paramsexp['outfilePart1'] + "_correlations.txt", cors, delimiter="\n", fmt="%s")
+            np.savetxt(common_path + "_correlations.txt", cors, delimiter="\n", fmt="%s")
 
 
 ############################################################################################################
@@ -2026,18 +2231,16 @@ def make_violin_plots(distributions, params):
 def compare_norm_values(params):
     print("Comparing normalization values")
     for channel in params['channelsToAnalyze']:
-        if channel == 0: color = "cy3"
-        if channel == 1: color = "cy5"
+        color = ('cy3', 'cy5')[channel]
         normVals = []
         datasets = []
-        for file in range(0, len(params['fileListIn'])):
-            pathIn = params['fileListIn'][file]
-            date = pathIn.split("/")[-3]
-            expName = pathIn.split("/")[-2]
-            fileName = params['outputfolder'] + date + "_" + expName + "/" + date + "_" + expName + "_cyto_normalization_value_" + color + ".txt"
+        for file in params['fileListIn']:
+            paramsexp = get_exp_info(file, params)
+            fileName = os.path.join(paramsexp['pathOut'],
+                                    f"{paramsexp['date']}_{paramsexp['expName']}_cyto_normalization_value_{color}.txt")
             normVal = np.loadtxt(fileName)
             normVals.append(normVal)
-            datasets.append(date + "\n" + expName)
+            datasets.append(f"{paramsexp['date']}\n{paramsexp['expName']}")
 
         normtable = np.c_[range(1, len(params['fileListIn']) + 1), datasets, normVals]
         np.savetxt(params['analysisfolder'] + "Cyto_normalization_values_" + color + ".txt", normtable, fmt="%s", delimiter='\t')
@@ -2065,7 +2268,6 @@ NucldistrCy3 = []
 NucldistrCy5 = []
 
 def FISH_pipeline(params):
-
     if not isinstance(params, dict):
         parameter_file = params
         if parameter_file[-3:] == '.py':
@@ -2074,34 +2276,34 @@ def FISH_pipeline(params):
             parameter_file = parameter_file[:-3]+'.yml'
         if not parameter_file[-4:] == '.yml':
             parameter_file += '.yml'
-        params = misc.getConfig(parameter_file)
+        params = misc.getParams(parameter_file, __file__.replace('.py', '_parameters_template.yml'),
+                                ('folderIn', 'fileListIn', 'outputfolder', 'analysisfolder'))
     else:
         parameter_file = ''
 
-    params = calculate_general_parameters(params, parameter_file)
+    params = calculate_general_parameters(params)
 
+    for fn, file in enumerate(params['fileListIn']):
+        print(f"Analyzing smFISH dataset {fn + 1} out of {len(params['fileListIn'])}: {file}")
 
-
-    for file in range(0, params['lenfileListIn']):
-        print('Analyzing smFISH dataset ' + str(file + 1) + ' out of ' + str(params['lenfileListIn']) + ': ' + params['fileListIn'][file])
-
-        paramsexp = get_exp_info(params['fileListIn'][file], params)
-        lfn = get_filelist(params['fileListIn'][file], params)
-        paramsexp = get_turret_filters(params['fileListIn'][file], lfn, paramsexp)
+        paramsexp = get_exp_info(file, params)
+        lfn = get_filelist(file, params)
+        paramsexp = get_turret_filters(file, lfn, paramsexp)
 
         dateTimeObj = datetime.now()
         dateTime = dateTimeObj.strftime("%d-%b-%Y_%Hh%Mm%Ss")
         if os.path.exists(parameter_file):
             shutil.copyfile(os.path.abspath(parameter_file),
-                            os.path.join(paramsexp['outfilePart1'] + "FISH_pipeline_parameters_runtime_" + dateTime + ".yml"))
+                            f"{paramsexp['outfilePart1']}FISH_pipeline_parameters_runtime_{dateTime}.yml")
         else:
-            parameter_file = os.path.join(paramsexp['outfilePart1'] + "FISH_pipeline_parameters_runtime_" + dateTime + ".yml")
+            parameter_file = f"{paramsexp['outfilePart1']}FISH_pipeline_parameters_runtime_{dateTime}.yml"
             with open(parameter_file, 'w') as f:
                 yaml.dump(params, f)
-        shutil.copyfile(os.path.abspath(__file__), os.path.join(paramsexp['outfilePart1'] + "_FISH_pipeline.py"))
+        shutil.copyfile(os.path.abspath(__file__), f"{paramsexp['outfilePart1']}_FISH_pipeline.py")
+        shutil.copyfile(os.path.abspath(_version.__file__), f"{paramsexp['outfilePart1']}_smfish_version.py")
 
         if params['MaxProj'] == 1:
-            max_projection(params['fileListIn'][file], lfn, params, paramsexp )
+            max_projection(file, lfn, paramsexp)
 
         if params['RunCellprofiler'] == 1:
             run_cellprofiler(lfn, params, paramsexp)
@@ -2110,10 +2312,10 @@ def FISH_pipeline(params):
             find_cells(lfn, params, paramsexp)
 
         if params['RunOptimizeThresh'] == 1:
-            run_optimize_threshold(params['fileListIn'][file], lfn, params, paramsexp)
+            run_optimize_threshold(file, lfn, params, paramsexp)
 
         if params['RunLocalize'] == 1:
-            run_localize(params['fileListIn'][file], lfn, params, paramsexp)
+            run_localize(file, lfn, params, paramsexp)
 
         if params['MakeMaskImage'] == 1:
             make_mask_image(lfn, params, paramsexp)
@@ -2124,7 +2326,7 @@ def FISH_pipeline(params):
             make_montage(path, lfn, paramsexp['outfilePart1'] + '_montagePython', 'max')
             make_montage(path, lfn, paramsexp['outfilePart1'] + '_montagePython', 'max_cell_mask', colormap='glasbey')
             make_montage(path, lfn, paramsexp['outfilePart1'] + '_montagePython', 'max_nucleus_mask', colormap='glasbey')
-            
+
         if params['CellCycle'] == 1:
             CellCycle(lfn, params, paramsexp)
 
@@ -2142,9 +2344,9 @@ def FISH_pipeline(params):
         if params['UsePrecalcDistr'] == 1:
             if not rawdistributions:
                 print("Recalculating distributions")
-                for file in range(0, params['lenfileListIn']):
-                    paramsexp = get_exp_info(params['fileListIn'][file], params)
-                    lfn = get_filelist(params['fileListIn'][file], params, paramsexp)
+                for file in params['fileListIn']:
+                    paramsexp = get_exp_info(file, params)
+                    lfn = get_filelist(file, params, paramsexp)
                     rawdistributions = make_TS_count_histograms(lfn, params, paramsexp['outfilePart1'])
             else:
                  print("Using pre-analyzed datasets")
@@ -2156,9 +2358,9 @@ def FISH_pipeline(params):
             distributions = distributionscombined
         elif params['CombineReps'] == 0:
             if params['UsePrecalcDistr'] == 1 and not rawdistributions:
-                for file in range(0, params['lenfileListIn']):
-                    paramsexp = get_exp_info(params['fileListIn'][file], params)
-                    lfn = get_filelist(params['fileListIn'][file], params, paramsexp)
+                for file in params['fileListIn']:
+                    paramsexp = get_exp_info(file, params)
+                    lfn = get_filelist(file, params, paramsexp)
                     rawdistributions = make_TS_count_histograms(lfn, params, paramsexp['outfilePart1'])
                     distributions = rawdistributions
             else:
@@ -2174,8 +2376,10 @@ def FISH_pipeline(params):
     return params, rawdistributions
 
 
-def main(argv):
-    if len(argv)<2:
+def main():
+    ipy_debug()
+    tm = time()
+    if len(sys.argv) < 2:
         if os.path.exists('FISH_pipeline_parameters.yml'):
             parameter_file = 'FISH_pipeline_parameters.yml'
         elif os.path.exists('FISH_pipeline_parameters.py'):
@@ -2184,19 +2388,17 @@ def main(argv):
             raise FileNotFoundError('Could not find the parameter file.')
         print(('Using ' + parameter_file))
     else:
-        parameter_file = argv[1]
+        parameter_file = sys.argv[1]
 
-    tm = time()
     params, rawdistributions = FISH_pipeline(parameter_file)
 
     if os.path.basename(__file__) in [os.path.basename(i) for i in psutil.Process(os.getpid()).cmdline()]:
-        imr.kill_vm() #stop java used for imread, needed to let python exit
+        imr.kill_vm()  #stop java used for imread, needed to let python exit
         print('Stopped the java vm used for imread.')
 
     print('------------------------------------------------')
     print(misc.color('Pipeline finished, took {} seconds.'.format(time()-tm), 'g:b'))
-    return params, rawdistributions
 
 
 if __name__ == '__main__':
-    params, rawdistributions = main(sys.argv)
+    main()

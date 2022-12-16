@@ -19,9 +19,9 @@ analysisfolder:
 #  -nrFilesToAnalyze: specify number of images you want to analyze. Only works if processAll is 0
 #  -channelsToAnalyze: [0,1] ### list of channels to analyze in: 0 = Cy3, 1 = Cy5.
 
-processAll:
-nrFilesToAnalyze:
-channelsToAnalyze:
+processAll: True
+nrFilesToAnalyze: 1
+channelsToAnalyze: [0, 1]
 
 #### specify which part of the code you want to run
 #  -MaxProj: 0 or 1. note: If manually made with FIJI, order or channels may be different.
@@ -40,28 +40,28 @@ channelsToAnalyze:
 #  -CombineReps: 0 or 1. Combine replicates and make histograms and violin plots (optional)
 #  -UsePrecalcDistr: 0 or 1. To use precalculated histogram distributions
 
-MaxProj:
-RunCellprofiler:
-RunFindCells:
-RunOptimizeThresh:
-RunLocalize:
-MakeMaskImage:
-MakeMontage:
-CellCycle:
-CalculateTranscriptionSites:
-MakeHistograms:
-CalcSingleCellCorr:
-Violins:
-CompareNormValues:
-CombineReps:
-UsePrecalcDistr:
+MaxProj: True
+RunCellprofiler: True
+RunFindCells: True
+RunOptimizeThresh: True
+RunLocalize: True
+MakeMaskImage: True
+MakeMontage: True
+CellCycle: True
+CalculateTranscriptionSites: True
+MakeHistograms: True
+CalcSingleCellCorr: True
+Violins: True
+CompareNormValues: True
+CombineReps: True
+UsePrecalcDistr: True
 
 ##### Parameters max projection
-#  -zSlices: nr z slices, example: 9
+#  -zSlices: nr z slices, example: 9, or range examples: [2, 5] or [2, -2]
 #  -nChannels: nr channels including DAPI channel, example for cy3-cy5-DAPI data: 3
 
-zSlices:
-nChannels:
+zSlices: None
+nChannels: 2
 
 ##### Parameters for RunCellprofiler
 #  -PipelineCellProfiler: full path of cellprofiler pipeline. Only necessary if RunCellprofiler is run.
@@ -84,40 +84,86 @@ PipelineCellProfiler:
 #  -dilate: dilate>0: make every cell dilate pixels larger; <0: make them smaller
 #  -dilatenuc: example: 3
 
-channelCellMask :
-ccdist :
-threshold :
-thresholdnuc :
-removeborders :
-thres :
-thresnuc :
-smooth :
-smoothnuc :
-minfeatsize :
-minfeatsizenuc :
-dilate :
-dilatenuc :
+channelCellMask: Cy3
+ccdist: 25
+threshold:
+thresholdnuc:
+removeborders: True
+thres:
+thresnuc:
+smooth:
+smoothnuc:
+minfeatsize:
+minfeatsizenuc:
+dilate:
+dilatenuc:
 
 ##### Parameters Localize
-#  -localizeDim : "2D" or "3D". For 3D, preferably image with 0.3 um z step and take more frames above and below cell for fitting.
-#  -threshold_cy3: threshold for Cy3 channel, example: 75
-#  -threshold_cy5: threshold for Cy5 channel, example: 50
+#  -dimension: 2 or 3. For 3D, preferably image with 0.3 um z step and take more frames above and below cell for fitting.
+#  -optimize_width: True: also do a fit where the fit window dynamically adjusts according to the width of the spot, keep this result if the fit is successful, otherwise keep the fit with fixed window size. Do not use optimize_width together with refine_fit.
+#  -correct_fit_window: True: correct spot width and intensity for underestimation due to a small fit window, does not work perfectly when the background estimation is bad
+#  -refine_fit: False: only use moment analysis to 'fit' spots; True: also do a real fit after to optimize the localization, intensity etc. Do not use together with optimize_width.
+#  -fit:  parameters used when refine_fit: True
+#    -max_sigma(_z): upper bound for sigma(_z) during refine_fit.
+#    -fit_weight_sigma: us a gaussian with sigma = fit_weight_sigma * psfPx(Z) for weights on the ROI
+#  -threshold.cy3: threshold for Cy3 channel, example: 75
+#  -threshold.cy5: threshold for Cy5 channel, example: 50
 #  -psfPx:2.18 # PSF width in pixels. Can be calculated by: (wavelength emitted light * magnification) / (2 * NA objective * camera pixel size). NA objective 40x = 1.4. camera pixel size = 6500 nm. With 40x objective with optovar 1.25, psfPx = 1.70 (cy3 = 1.57 /cy5 = 1.84), for 40x objective with optovar 1.6, pxfPx = 2.18 (cy3 = 2.0 /cy5 = 2.36)
 #  -psfPxZ : PSF in z in pixels. Can be calculated by: (wavelength * RI of mounting media) / ((NA objective)^2 * zstep). RI  = 1.47 for prolong gold. NA objective 40x = 1.4. For 40x objective, 500 nm zstep, psfZPx = 0.93 (cy3 = 0.855, cy5 = 1.005)
-#  -maxDist: Maximal distance tolerated between guess and fit (in PSF width), example: 3.
-#  -minSeparation: Minimal distance tolerated between two spots (in PSF width), example: .1
+#  -bpassLimits: lower and upper limit in psfPx and psfPxZ used when bandpass filtering the image before localization
+#     we used to have [0.75, 1] for 2D and [1/psfPx, 1] for 3D
 #  -winSize:  size of the window used for PSF fitting, example: 5
 #  -winSizeZ: size of the window used for PSF fitting in z, example: 3
+#  -filter
+#    -distance: Maximal distance tolerated between guess and fit (in PSF width), example: 3.
+#    -dintensity: max relative error
+#    -precision: max localization error in um
+#    -offset: min absolute offset
+#    -doffset: max relative error
+#    -tilt: min absolute tilt
+#    -dtilt: max relative error
+#    -R2: min R2 of fit
+#    -R2_peak: min R2 of peak part of fit
+#    -R2_background: min R2 of background part of fit
+#    -s, sz: [min, max] of peak width in xy or z
+#    -distance: max distance between guess and fit
+#    -separation: Minimal distance tolerated between two spots (in PSF width), example: .1
 
-localizeDim :
-threshold_cy3:
-threshold_cy5:
-psfPx:
-psfPxZ :
-maxDist:
-minSeparation:
-winSize :
-winSizeZ :
+
+localize:
+  optimize_width: False
+  correct_fit_window: False
+  dimension: 2
+  threshold:
+    method: Abs
+    cy3:
+    cy5:
+  psfPx:
+  psfPxZ:
+  bpassLimits: [0.75, 1]
+  winSize:
+  winSizeZ:
+  refine_fit: False
+  fit:
+    max_sigma:
+    max_sigma_z:
+    fit_weight_sigma: 2
+  filter:
+    intensity: 0
+    dintensity:
+    precision:
+    offset:
+    doffset:
+    tilt:
+    dtilt:
+    R2:
+    R2_peak:
+    R2_background:
+    s:
+    sz:
+    distance:
+    separation:
+
 
 ##### Parameters CellCycle
 #   -fitNucHistogram: Enter 0 or 1. This fits the bimodal distribution with Gaussians. Needs to be calculated for subsequent steps.
@@ -128,17 +174,17 @@ winSizeZ :
 #   -CellCycleStages: Enter which stage you want analyzed. Four options are: ['G1cellswithbuds','G1cells','Scells','G2cells'].
 #   -makeMasks: Enter 0 or 1. This makes the cell and nuclear masks for the subset of cells that are selected based on the dapi thresholds. Masks are saved in the respective subfolders. Required for CalculateTranscriptionSites, MakeHistograms and CalcSingleCellCorr.
 
-fitNucHistogram:
-removeOutliers:
+fitNucHistogram: True
+removeOutliers: True
 sigmaG1cells:
 sigmaG2cells:
-manualThreshold:
-CellCycleStages:
-makeMasks:
+manualThreshold: None
+CellCycleStages: G1Cells
+makeMasks: True
 
 ##### Parameters Calculate TS
 #  -MaskTS : "nucleus " or "cell". Mask used for defining the TS (brightest spot)
-#  -AreaNorm : "cyto", "nucleus", "cell" or "mindist". Area used for the normalizing spots. "cyto" means in cell but not in nucleus, "nucleus" means nucleus, "cell" means entire cell including nucleus and "mindist" means only use isolated spots (minimum distance to nearest spot is 10pixels--distance can be changed in the script) for normalization. 
+#  -AreaNorm : "cyto", "nucleus", "cell" or "mindist". Area used for the normalizing spots. "cyto" means in cell but not in nucleus, "nucleus" means nucleus, "cell" means entire cell including nucleus and "mindist" means only use isolated spots (minimum distance to nearest spot is 10pixels--distance can be changed in the script) for normalization.
 #  -ExclEmpty : 0 or 1. excludes cells that are completely empty, no RNAs in either nucleus or cytoplasm. Uses channel that is analyzed to determine if cell is empty. If you want to use another channel, set ExlcEmpty 0 and set parameter useControlForEmptyCells to 1.
 #  -useControlForEmptyCells : 0 or 1 . Uses control hybridization (can be other channel) to determine whether cell is empty (no RNA in cell or nucleus). Removes these cells from analysis in all colors. Set control channel with parameter controlColor. Can only be used if ExclEmpty: 0
 #  -controlColor: 0 or 1. 0 = Cy3, 1 = Cy5. Set which probe set is control. Is used if useControlForEmptyCells is 1.
@@ -150,9 +196,9 @@ makeMasks:
 #  -thresholdTS : threshold used to determine if nuclear spot is TS (if includeMultTS is 1). The threshold indicates how many nascent RNAs need to present to qualify as TS (it is is multiplied by the normalization factor of the cytoplasmic spot intensity). Note, the results do not contain the cells without TS. Example: 1.5
 #  -nrTS2Include :number of TS to include in the analysis (if includeMultTS is 2). It will select the brightest spots as TS. Note, if less TS are found in a nucleus, the script will add a zero (so each cell will have same nr of TS). Example: 2
 
-MaskTS:
-AreaNorm:
-ExclEmpty:
+MaskTS: nucleus
+AreaNorm: nucleus
+ExclEmpty: False
 useControlForEmptyCells:
 controlColor:
 useFit:
@@ -189,12 +235,12 @@ nrbins_cy3:
 nrbins_cy5:
 nrbins_cy3_ts:
 nrbins_cy5_ts:
-freqAxisCell_cy3 :
-freqAxisCell_cy5 :
-freqAxisNuc_cy3 :
-freqAxisNuc_cy5 :
-freqAxisTS_cy3 :
-freqAxisTS_cy5 :
+freqAxisCell_cy3:
+freqAxisCell_cy5:
+freqAxisNuc_cy3:
+freqAxisNuc_cy5:
+freqAxisTS_cy3:
+freqAxisTS_cy5:
 
 ##### Parameters CalcSingleCellCorr
 #  -filterOnDistance: 0 or 1. Set to 1 if you want to filter on co-localized Cy3 - Cy5 spots, set threshold in distThresh

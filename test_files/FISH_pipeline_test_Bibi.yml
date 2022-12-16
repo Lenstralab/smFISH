@@ -110,15 +110,27 @@ dilatenuc : 0
 #  -winSize:  size of the window used for PSF fitting, example: 5
 #  -winSizeZ: size of the window used for PSF fitting in z, example: 3
 
-localizeDim : "2D"
-threshold_cy3: 21
-threshold_cy5: 16
-psfPx: 2.18
-psfPxZ : 1.46
-maxDist: 3.
-minSeparation: .1
-winSize : 5
-winSizeZ : 5
+localize:
+  dimension: 2
+  threshold:
+    method: Abs
+    cy3: 21
+    cy5: 16
+  psfPx: 2.18
+  psfPxZ: 1.46
+  winSize: 5
+  winSizeZ: 5
+  filter:
+    intensity: 0  # min absolute intensity
+    dintensity:  # max relative error
+    precision:  # max localization error in um
+    offset:  # min absolute offset
+    doffset:  # max relative error
+    tilt:  # min absolute tilt
+    dtilt:  # max relative error
+    R2:  # min R2 of fit
+    distance: 3
+    separation: 0.1
 
 ##### Parameters Calculate TS
 #  -MaskTS : "nucleus " or "cell". Mask used for defining the TS (brightest spot)

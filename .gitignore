@@ -8,3 +8,8 @@ tmp.txt
 .pytest*
 /demo_output/
 /test_files/demo_output_correlations/
+*.egg*
+/build/
+/.pytest_cache/
+/.ipynb_checkpoints/
+/smfish/_version.py

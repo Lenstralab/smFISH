@@ -1,5 +1,6 @@
 # smFISH
-Lenstra labs code for single molecule FISH as used by Gowthaman et el, Brouwer et al and Patel et al.
+Lenstra lab code for single molecule FISH as used by Gowthaman et al., Brouwer et al., Patel et al.
+Parts of this code were used for Meeussen et al. (2022).
 This script uses Python 3.
 
 ## Cloning the repository
@@ -18,14 +19,16 @@ Install git: https://git-scm.com/
     git checkout 36e73147e1c61a57e3ebfac595017d01a0553130
 
 ## Installation
+Open the version of this README belonging to the specific version you just downloaded in the step above and continue from there.
+
 If not done already:
-- Install python (at least 3.7): https://www.python.org
+- Install python (at least 3.8): https://www.python.org
 - Install pip and git
-- First install SimpleElastix: https://simpleelastix.readthedocs.io/GettingStarted.html
 
 Then install the smFISH script (up to 5 minutes):
 
-    pip install -e . --user
+    pip install numpy cython pythran packaging ipython
+    pip install -e .[tllab_common]
 
 This will install the smfish package in your personal path in editable mode.
 
@@ -54,4 +57,4 @@ It will make a folder 'demo_output' (defined in the parameter .yml file) which c
 formats.
 
 ## Testing
-This script was tested with python 3.8 on Ubuntu 20.04
+This script was tested with python 3.10 on Ubuntu 20.04 and on Mac OSX.

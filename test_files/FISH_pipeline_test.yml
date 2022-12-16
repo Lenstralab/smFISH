@@ -110,15 +110,27 @@ dilatenuc : 3
 #  -winSize:  size of the window used for PSF fitting, example: 5
 #  -winSizeZ: size of the window used for PSF fitting in z, example: 3
 
-localizeDim : '3D'
-threshold_cy3: 80
-threshold_cy5: 83
-psfPx: 1.70
-psfPxZ : 1.55
-maxDist: 3.
-minSeparation: .1
-winSize : 5
-winSizeZ : 3
+localize:
+  dimension: 3
+  threshold:
+    method: Abs
+    cy3: 80
+    cy5: 83
+  psfPx: 1.70
+  psfPxZ: 1.55
+  winSize: 5
+  winSizeZ: 3
+  filter:
+    intensity: 0  # min absolute intensity
+    dintensity:  # max relative error
+    precision:  # max localization error in um
+    offset:  # min absolute offset
+    doffset:  # max relative error
+    tilt:  # min absolute tilt
+    dtilt:  # max relative error
+    R2:  # min R2 of fit
+    distance: 3
+    separation: 0.1
 
 ##### Parameters CellCycle
 #   -maxxValHist: maximum value of x-axis for DAPI histogram
